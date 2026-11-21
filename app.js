@@ -1,12 +1,14 @@
 import {COUNTRIES,detectCountry,money as fmtMoney,parseQty,fmtAmt,guessType,guessShape,SHAPES,lookupProduct,here,nearbyStores,recipesFor,recipeDetail} from './data.js';
 import {startScan,decodeImage} from './scanner.js';
+import * as cloud from './cloud.js';
+let ME=null,repCache={};
 
 /* ================= state ================= */
 const KEY='larder.v2',DAY=864e5;
 const blank=()=>({v:2,country:detectCountry(),onboarded:false,store:null,stores:[],locs:[],auto:null,showAv:true,products:{},pending:[],collected:[],purchases:[],home:[]});
 function load(){try{const r=localStorage.getItem(KEY);if(r)return Object.assign(blank(),JSON.parse(r))}catch(e){}return blank()}
 let S=load();
-function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}}
+function save(){S.updatedAt=Date.now();try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}if(ME&&S.syncUser===ME.id)cloud.pushState(ME.id,S)}
 
 /* ================= helpers ================= */
 const $=id=>document.getElementById(id);
@@ -108,10 +110,10 @@ function vList(){
     let total=0,unpriced=0;
     const rows=S.pending.map(x=>{const k=keyOf(x),lp=lastPaid(k),lb=lastBought(k);if(lp)total+=lp.price*x.qty;else unpriced++;
       return `<div class="row"><button class="check" data-collect="${x.id}" aria-label="Mark ${esc(nameOf(x))} collected"></button><div><div class="nm">${nameHtml(x)}</div>
-      <div class="sub">${lp?`Last paid ${money(lp.price)}${lp.store?' at '+esc(lp.store):''}, ${ago(lp.t)}`:'No price yet'}</div>${S.showAv&&lb&&lb.store&&(!lp||lb.store!==lp.store)?`<div class="sub">Last bought at ${esc(lb.store)}, ${ago(lb.t)}</div>`:''}${!x.code?'<div class="sub">Scan it in the store to get the exact product</div>':''}</div>
+      <div class="sub">${lp?`Last paid ${money(lp.price)}${lp.store?' at '+esc(lp.store):''}, ${ago(lp.t)}`:'No price yet'}</div>${S.showAv&&lb&&lb.store&&(!lp||lb.store!==lp.store)?`<div class="sub">Last bought at ${esc(lb.store)}, ${ago(lb.t)}</div>`:''}${!x.code?'<div class="sub">Scan it in the store to get the exact product</div>':''}${S.showAv&&x.code?shopperLine(x.code):''}</div>
       <div class="ctl"><div class="step"><button data-q="${x.id}" data-d="-1" aria-label="Fewer">−</button><span>${x.qty}</span><button data-q="${x.id}" data-d="1" aria-label="More">+</button></div><button class="x" data-delp="${x.id}" aria-label="Delete ${esc(nameOf(x))}">✕</button></div></div>`}).join('');
     h+=`<div class="card glass" style="margin-top:12px" ${rv(i++)}>${rows||`<div class="empty"><div class="big">Your list is clear</div>Type what you need above, or scan a barcode.</div>`}
-      ${S.pending.length?`<div class="total"><span class="small">Based on what you last paid${unpriced?` · ${unpriced} item${unpriced>1?'s':''} without a price`:''}</span><b>${money(total)}</b></div>`:''}</div>`;
+      ${S.pending.length?`<div class="total"><span class="small">Based on what you last paid${unpriced?` · ${unpriced} item${unpriced>1?'s':''} without a price`:''}</span><b>${unpriced===S.pending.length?'—':money(total)}</b></div>`:''}</div>`;
   }else{
     let tot=0,np=0;
     const rows=S.collected.map(x=>{if(x.price!=null)tot+=x.price*x.qty;else np++;return `<div class="row"><span class="check on" aria-hidden="true">✓</span><div><div class="nm">${nameHtml(x)}</div><div class="sub">${x.store?esc(x.store)+' · ':''}${x.price!=null?money(x.price)+(x.qty>1?' × '+x.qty:''):'No price entered'}</div>
@@ -130,6 +132,20 @@ function addPending(v){
   if(same)same.qty++;else S.pending.unshift(hit?{id:uid(),code:hit.code,qty:1}:{id:uid(),name:v[0].toUpperCase()+v.slice(1),qty:1});
 }
 
+/* shopper reports (real prices and stock seen by other people) */
+function latestPerStore(list){const m={};list.forEach(r=>{const k=r.store_osm||r.store_name;if(!m[k])m[k]=r});return Object.values(m)}
+function km(r){const p=S.lastPos;if(!p||r.lat==null)return null;const R=6371,x=(r.lat-p.lat)*Math.PI/180,y=(r.lon-p.lon)*Math.PI/180,h=Math.sin(x/2)**2+Math.cos(p.lat*Math.PI/180)*Math.cos(r.lat*Math.PI/180)*Math.sin(y/2)**2;return 2*R*Math.asin(Math.sqrt(h))}
+function getReports(code){const c=repCache[code];if(c&&now()-c.t<5*60e3)return c.list;if(!c||!c.loading){repCache[code]={t:0,list:c?c.list:null,loading:true};cloud.reportsFor(code,S.country).then(l=>{repCache[code]={t:now(),list:l};if(tab==='list')render();if(tab==='scan'&&scanState.code===code){const b=$('repbox');if(b)b.innerHTML=repHtml(code)}}).catch(()=>{repCache[code]={t:now(),list:[]}})}return c?c.list:null}
+function shopperLine(code){if(!cloud.enabled())return '';const l=getReports(code);if(!l||!l.length)return '';const st=latestPerStore(l),cheap=st.filter(r=>r.in_stock&&r.price!=null).sort((a,b)=>a.price-b.price)[0];
+  return cheap?`<div class="sub" style="color:var(--pist)">Lowest seen: ${money(cheap.price)} at ${esc(cheap.store_name)}, ${ago(new Date(cheap.created_at))} · shopper report</div>`:''}
+function repHtml(code){
+  if(!cloud.enabled())return '';
+  const l=getReports(code);
+  if(l===null)return `<div class="card glass"><span class="spin"></span>&nbsp; Checking shopper reports…</div>`;
+  const st=latestPerStore(l).sort((a,b)=>(km(a)??1e9)-(km(b)??1e9));
+  return `<h2>Seen by shoppers</h2><div class="card glass">${st.length?st.slice(0,12).map(r=>{const k=km(r);return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(r.store_name)}</div><div class="sub">${ago(new Date(r.created_at))}${k!=null?' · '+(k<1?Math.round(k*1000)+' m':k.toFixed(1)+' km'):''} · shopper report</div></div>${r.in_stock?(r.price!=null?`<b style="white-space:nowrap">${money(r.price)}</b>`:'<span class="chip good">In stock</span>'):'<span class="chip warn">Out of stock</span>'}</div>`}).join(''):'<p class="muted" style="margin:0">No one has reported this item in the last 30 days. Yours will be the first.</p>'}
+    <div class="acts2" style="margin-top:10px"><button class="btn sm ghost" data-oos>Out of stock here</button></div></div>`;
+}
 /* store picker shared by sheets */
 function storeField(id,val){
   const names=[...new Set([...(S.stores||[]).map(s=>s.name),...S.purchases.map(p=>p.store).filter(Boolean)])];
@@ -138,13 +154,14 @@ function storeField(id,val){
 }
 async function findNear(target){
   const box=$(target+'-near');if(!box)return;box.innerHTML='<span class="small"><span class="spin"></span> Finding every shop near you…</span>';
-  try{const pos=await here();const list=await nearbyStores(pos);
+  try{const pos=await here();S.lastPos=pos;const list=await nearbyStores(pos);
     if(!$(target+'-near'))return;
-    box.innerHTML=list.length?list.slice(0,24).map(s=>`<button type="button" data-setstore="${esc(s.name)}" data-osm="${esc(s.id)}" data-target="${target}">${esc(s.name)}<span class="small">&nbsp;· ${s.m<1000?s.m+' m':(s.m/1000).toFixed(1)+' km'}${s.kind?' · '+esc(s.kind):''}</span></button>`).join(''):'<span class="small">No shops found within 3 km on OpenStreetMap. Type the name instead.</span>';
+    box.innerHTML=list.length?list.slice(0,24).map(s=>`<button type="button" data-setstore="${esc(s.name)}" data-osm="${esc(s.id)}" data-lat="${s.lat}" data-lon="${s.lon}" data-target="${target}">${esc(s.name)}<span class="small">&nbsp;· ${s.m<1000?s.m+' m':(s.m/1000).toFixed(1)+' km'}${s.kind?' · '+esc(s.kind):''}</span></button>`).join(''):'<span class="small">No shops found within 3 km on OpenStreetMap. Type the name instead.</span>';
     box._list=list;
   }catch(e){box.innerHTML=`<span class="small">${e&&e.code===1?'Location permission was declined.':'Couldn\'t search right now.'} Type the store name instead.</span>`}
 }
-function rememberStore(name,osm){if(!name)return;S.store=name;if(!S.stores.some(s=>s.name===name))S.stores.unshift({name,id:osm||null});S.stores=S.stores.slice(0,30)}
+function rememberStore(name,osm,lat,lon){if(!name)return;S.store=name;const ex=S.stores.find(s=>s.name===name);if(ex){if(osm){ex.id=osm;ex.lat=lat;ex.lon=lon}}else S.stores.unshift({name,id:osm||null,lat:lat??null,lon:lon??null});S.stores=S.stores.slice(0,30)}
+const storeInfo=name=>S.stores.find(s=>s.name===name)||{name};
 
 function collectSheet(id){
   const x=S.pending.find(y=>y.id===id);if(!x)return;const lp=lastPaid(keyOf(x));
@@ -159,6 +176,7 @@ function doCollect(x,store,price,qty){
   const pur={id:uid(),code:x.code||null,name:x.code?null:x.name,t:now(),store,price,qty};S.purchases.push(pur);
   S.pending=S.pending.filter(y=>y.id!==x.id);
   S.collected.unshift({id:uid(),code:x.code||null,name:x.name||null,qty,store,price,pid:pur.id});
+  if(ME&&x.code&&store){const si=storeInfo(store);cloud.report({code:x.code,store_name:store,store_osm:si.id||null,lat:si.lat??null,lon:si.lon??null,country:S.country,currency:COUNTRIES[S.country][1],price,in_stock:true}).then(ok=>{if(ok)delete repCache[x.code]})}
   render();toast(`Collected ${qty>1?qty+' × ':''}${x.code?title(P(x.code)):x.name}`);
 }
 const LOCS=['Fridge · top shelf','Fridge · middle shelf','Fridge · door','Fridge · crisper drawer','Freezer','Pantry · top shelf','Kitchen cabinet','Counter'];
@@ -281,7 +299,7 @@ function resultHtml(){
     <div class="field">Storage, as printed on the label<input type="text" id="np-st" placeholder="e.g. Keep refrigerated"></div><button class="btn" style="width:100%">Save product</button></form></div>`;
   return `<div class="card glass" style="margin-top:14px"><div class="prod"><div class="ph">${p.image?`<img src="${esc(p.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:vessel(p.shape,1,colorOf(p.type))}</div><div><div class="pname">${esc(title(p))}</div><div class="sub">${esc(p.label||'Size unknown')} · ${esc(p.code)}</div></div></div>
     <div style="margin-top:14px">${storeField('ss',S.store)}<div class="field">Price on the shelf<input type="number" id="shelf" step="0.01" min="0" inputmode="decimal" value="${esc(s.shelf)}" placeholder="Optional, to compare with what you paid"></div></div></div>
-    <div id="insbox">${insHtml()}</div>
+    <div id="insbox">${insHtml()}</div><div id="repbox">${repHtml(s.code)}</div>
     ${infoTable(s.code,null)}`;
 }
 function insHtml(){
@@ -297,7 +315,7 @@ async function lookup(code){
   Object.assign(scanState,{code,loading:!P(code),err:null,shelf:''});
   if(tab!=='scan'){tab='scan';history.replaceState(null,'','#scan');render(true)}else drawRes();
   if(navigator.vibrate)navigator.vibrate(30);
-  if(!P(code)){try{const p=await lookupProduct(code);if(p)S.products[code]=p}catch(e){scanState.err=true}scanState.loading=false;save();drawRes()}
+  if(!P(code)){try{let p=await lookupProduct(code);if(!p)p=await cloud.sharedProduct(code).catch(()=>null);if(p)S.products[code]=p}catch(e){const sp=await cloud.sharedProduct(code).catch(()=>null);if(sp)S.products[code]=sp;else scanState.err=true}scanState.loading=false;save();drawRes()}
   const r=$('res');r&&r.scrollIntoView({behavior:'smooth',block:'start'});
 }
 async function camera(){
@@ -398,15 +416,48 @@ function vSavings(){
   return h;
 }
 
+/* ================= account ================= */
+let prof=null;
+function acctHtml(){
+  if(!cloud.enabled())return '<p class="muted" style="margin:0">Sign-in and reminders switch on once the Larder server is connected.</p>';
+  if(!ME)return `<form id="sif"><div class="field">Email<input type="email" id="sie" required autocomplete="email" placeholder="you@example.com" style="height:48px;border:1px solid var(--line);border-radius:14px;background:var(--g2);padding:0 14px;font-size:16px"></div><button class="btn" style="width:100%">Email me a sign-in link</button><p class="small" style="margin:8px 0 0">No password. Open the link on this phone to sign in.</p></form>`;
+  const ios=cloud.isIOS()&&!cloud.standalone();
+  return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(ME.email)}</div><div class="sub">Signed in · syncing</div></div><button class="btn sm ghost" id="sout">Sign out</button></div>
+   <label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Push notifications<span class="src">${ios?'On iPhone: Share → Add to Home Screen, then open Larder from there to turn this on.':'Expiry, running low and price drops, around 9am'}</span></span><input type="checkbox" id="npush" ${prof&&prof.notify_push?'checked':''} ${ios?'disabled':''} style="width:24px;height:24px"></label>
+   <label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Email reminders<span class="src">The same alerts, sent to ${esc(ME.email)}</span></span><input type="checkbox" id="nmail" ${prof&&prof.notify_email?'checked':''} style="width:24px;height:24px"></label>
+   ${prof&&(prof.notify_push||prof.notify_email)?'<button class="btn sm ghost" id="ntest" style="margin-top:8px">Send me a test</button>':''}`;
+}
+function bindAcct(){
+  const f=$('sif');if(f)f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('.btn');b.disabled=true;b.textContent='Sending…';try{await cloud.signIn($('sie').value.trim());$('acct').innerHTML=`<p style="margin:0"><strong>Check your email.</strong><br><span class="muted">Tap the link from ${esc($('sie')?$('sie').value:'your inbox')} on this phone.</span></p>`}catch(err){b.disabled=false;b.textContent='Email me a sign-in link';toast(err.message||'Couldn\'t send the link')}};
+  if($('sout'))$('sout').onclick=async()=>{await cloud.disablePush().catch(()=>{});await cloud.signOut();ME=null;prof=null;S.syncUser=null;save();settings();toast('Signed out. Your data stays on this phone')};
+  if($('npush'))$('npush').onchange=async e=>{const on=e.target.checked;try{if(on)await cloud.enablePush(ME.id);else await cloud.disablePush();prof={...(prof||{}),notify_push:on};await cloud.saveProfile(ME.id,{notify_push:on});toast(on?'Push notifications on':'Push notifications off')}catch(err){e.target.checked=false;toast(err.message==='denied'?'Notifications are blocked. Allow them in your browser settings.':err.message==='ios-home'?'Add Larder to your Home Screen first':'This browser can\'t do push notifications')}$('acct').innerHTML=acctHtml();bindAcct()};
+  if($('nmail'))$('nmail').onchange=async e=>{const on=e.target.checked;try{prof={...(prof||{}),notify_email:on};await cloud.saveProfile(ME.id,{notify_email:on,email:ME.email});toast(on?'Email reminders on':'Email reminders off')}catch(err){e.target.checked=!on;toast('Couldn\'t save')}$('acct').innerHTML=acctHtml();bindAcct()};
+  if($('ntest'))$('ntest').onclick=async()=>{try{const r=await cloud.testNotify();toast(`Test sent${r.pushed?' · push to '+r.pushed+' device'+(r.pushed>1?'s':''):''}${r.mailed?' · email':''}`)}catch(e){toast('Couldn\'t send the test')}};
+}
+async function onSignedIn(u){
+  let remote=null;try{remote=await cloud.pull(u.id)}catch(e){}
+  const localHas=S.pending.length+S.home.length+S.purchases.length+S.collected.length>0;
+  const adopt=()=>{const keep={onboarded:true};S=Object.assign(blank(),remote.state,keep);S.syncUser=u.id;save();render(true)};
+  const mine=()=>{S.syncUser=u.id;save()};
+  if(remote&&S.syncUser!==u.id&&localHas){
+    open(`<h1>Which data should we keep?</h1><p class="lede">This phone and your account both have groceries saved.</p><div class="acts2"><button class="btn ghost" id="kp">This phone</button><button class="btn" id="ka">My account</button></div>`,()=>{if(S.syncUser!==u.id)mine()});
+    $('kp').onclick=()=>{mine();close()};$('ka').onclick=()=>{adopt();close()};
+  }else if(remote&&(S.syncUser!==u.id||new Date(remote.updated_at).getTime()>(S.updatedAt||0)))adopt();
+  else mine();
+  try{prof=await cloud.getProfile(u.id);await cloud.saveProfile(u.id,{email:u.email,country:S.country,tz:Intl.DateTimeFormat().resolvedOptions().timeZone})}catch(e){}
+}
+
 /* ================= settings & onboarding ================= */
 function settings(){
   open(`<h1>Settings</h1><div class="field">Country<select id="sc">${Object.entries(COUNTRIES).sort((a,b)=>a[1][0].localeCompare(b[1][0])).map(([k,v])=>`<option value="${k}" ${k===S.country?'selected':''}>${esc(v[0])} (${v[1]})</option>`).join('')}</select></div>
    <div class="card glass"><label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Add finished items to Pending automatically</span><input type="checkbox" id="sa" ${S.auto?'checked':''} style="width:24px;height:24px"></label>
    <label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Show where you last bought items</span><input type="checkbox" id="sv" ${S.showAv?'checked':''} style="width:24px;height:24px"></label></div>
+   <h2>Account and reminders</h2><div class="card glass" id="acct">${acctHtml()}</div>
    <h2>Your stores</h2><div class="card glass">${S.stores.length?S.stores.map((s,ix)=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>${esc(s.name)}</span><button class="x" data-delstore="${ix}" aria-label="Remove ${esc(s.name)}">✕</button></div>`).join(''):'<p class="muted" style="margin:0">Stores you shop at appear here.</p>'}</div>
-   <h2>Your data</h2><p class="muted">Everything stays on this phone.</p><div class="acts2"><button class="btn ghost" id="sx">Copy backup</button><button class="btn ghost" id="serase">Erase everything</button></div>
+   <h2>Your data</h2><p class="muted">${ME?'Saved on this phone and synced to your account.':'Saved on this phone. Sign in to sync across devices.'}</p><div class="acts2"><button class="btn ghost" id="sx">Copy backup</button><button class="btn ghost" id="serase">Erase everything</button></div>
    <p class="small" style="margin-top:18px">Product info from Open Food Facts · Stores from OpenStreetMap · Recipes from TheMealDB</p>`);
-  $('sc').onchange=()=>{S.country=$('sc').value;render()};$('sa').onchange=()=>{S.auto=$('sa').checked;save()};$('sv').onchange=()=>{S.showAv=$('sv').checked;render()};
+  bindAcct();
+  $('sc').onchange=()=>{S.country=$('sc').value;render();if(ME)cloud.saveProfile(ME.id,{country:S.country}).catch(()=>{})};$('sa').onchange=()=>{S.auto=$('sa').checked;save()};$('sv').onchange=()=>{S.showAv=$('sv').checked;render()};
   $('sx').onclick=async()=>{try{await navigator.clipboard.writeText(JSON.stringify(S));toast('Backup copied')}catch(e){toast('Couldn\'t copy on this browser')}};
   $('serase').onclick=()=>{const b=$('serase');if(b.dataset.sure){const c=S.country;S=blank();S.country=c;S.onboarded=true;close();render(true);toast('Everything erased')}else{b.dataset.sure=1;b.textContent='Tap again to erase';b.style.color='var(--amber)'}};
 }
@@ -434,7 +485,7 @@ document.addEventListener('submit',e=>{
   if(id==='bcf'){e.preventDefault();lookup($('bcin').value)}
   if(id==='newp'){e.preventDefault();const name=$('np-n').value.trim(),size=+$('np-s').value,unit=$('np-u').value,type=guessType(name);
     S.products[scanState.code]={code:scanState.code,brand:$('np-b').value.trim(),name,label:size+' '+unit,size,unit,image:null,type,shape:guessShape(type,[],[],size,unit),storage:$('np-st').value.trim()||null,storageSrc:'Typed from the label by you',allergens:[],traces:[],ingredients:null,nutrition:[],nutriscore:null,categories:[],src:'You'};
-    scanState.err=null;save();drawRes();toast('Product saved')}
+    scanState.err=null;save();drawRes();cloud.shareProduct(scanState.code,{...S.products[scanState.code],src:'Shared by a shopper'}).then(ok=>toast(ok?'Product saved and shared':'Product saved'))}
 });
 document.addEventListener('input',e=>{
   if(e.target.id==='q'){S.q=e.target.value;const pos=e.target.selectionStart;render();const q=$('q');q.focus();try{q.setSelectionRange(pos,pos)}catch(_){}}
@@ -454,7 +505,7 @@ document.addEventListener('click',e=>{
   if(d.away)awaySheet([d.away]);
   if('awayall' in d){const known=S.collected.filter(x=>P(x.code)&&P(x.code).size).map(x=>x.id);awaySheet(known.length?known:[S.collected[0].id])}
   if(d.loc){$('al').value=d.loc}
-  if(d.setstore){const inp=$(d.target);if(inp){inp.value=d.setstore;rememberStore(d.setstore,d.osm);if(d.target==='ss'){save();const b=$('insbox');if(b)b.innerHTML=insHtml()}}}
+  if(d.setstore){const inp=$(d.target);if(inp){inp.value=d.setstore;rememberStore(d.setstore,d.osm,d.lat?+d.lat:null,d.lon?+d.lon:null);if(d.target==='ss'){save();const b=$('insbox');if(b)b.innerHTML=insHtml()}}}
   if(d.near){findNear(d.near)}
   if(d.det)detail(d.det);
   if(d.unlog){const it=S.home.find(x=>x.id===d.unlog);const l=it&&it.logs.pop();if(l){it.rem=Math.min(it.total,it.rem+l.a);save();render();refreshDetail(it);toast('Undone')}}
@@ -466,6 +517,7 @@ document.addEventListener('click',e=>{
   if(d.buy){collectScanned(+d.buy)}
   if('skip' in d){scanState.code=null;drawRes();toast('Skipped. You have enough at home')}
   if('topend' in d){const code=scanState.code,p=P(code);const g=S.pending.find(x=>!x.code&&p.type&&x.name.toLowerCase().includes(p.type));if(g){g.code=code;delete g.name}else if(!S.pending.some(x=>x.code===code))S.pending.unshift({id:uid(),code,qty:1});scanState.code=null;save();drawRes();toast('Added to Pending')}
+  if('oos' in d){if(!ME){toast('Sign in (Settings) to share stock reports');return}const store=($('ss')&&$('ss').value.trim())||S.store;if(!store){toast('Pick the store first');return}const si=storeInfo(store);rememberStore(store);cloud.report({code:scanState.code,store_name:store,store_osm:si.id||null,lat:si.lat??null,lon:si.lon??null,country:S.country,currency:COUNTRIES[S.country][1],price:null,in_stock:false}).then(ok=>{delete repCache[scanState.code];const b=$('repbox');if(b)b.innerHTML=repHtml(scanState.code);toast(ok?'Thanks. Others will see it\'s out of stock here':'Couldn\'t send the report')})}
   if(d.rview)recipeView(+d.rview);
   if(d.rmade){madeSheet(+d.rmade)}
   if(d.rmiss){const r=recState.items[+d.rmiss];r.ings.filter(g=>!g.have).forEach(g=>addPending(g.name));close();render();toast('Missing ingredients added to Pending')}
@@ -478,4 +530,5 @@ document.addEventListener('visibilitychange',()=>{if(document.hidden&&stopCam){s
 
 render(true);
 if(!S.onboarded)setTimeout(onboard,500);
+if(cloud.enabled()){cloud.onAuth(async u=>{const was=ME&&ME.id;ME=u;if(u&&u.id!==was){await onSignedIn(u);if(/[?&]code=/.test(location.search))history.replaceState(null,'',location.pathname+'#'+tab);toast('Signed in as '+u.email)}render()})}
 if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
