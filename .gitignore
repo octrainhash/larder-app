@@ -1,3 +1,5 @@
 node_modules/
 *.local
 vapid*.json
+Claude outputs/
+*.zip
