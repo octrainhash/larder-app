@@ -36,7 +36,10 @@
     <section class="page" id="p-cart" role="tabpanel" aria-labelledby="t-cart"></section>
     <section class="page" id="p-home" role="tabpanel" aria-labelledby="t-home"></section>
   </main>
-  <button class="fab" id="fab"><svg class="i" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 8v8M11 8v8M14 8v8M17 8v8"/></svg>Scan</button>
+  <nav class="dock" id="dock" aria-label="Actions">
+    <button class="btn go" id="dockput" hidden><svg class="i" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7M5 10v10h14V10"/></svg>Put it all away</button>
+    <button class="scanb" id="fab"><svg class="i" viewBox="0 0 24 24"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 8v8M11 8v8M14 8v8M17 8v8"/></svg><span>Scan</span></button>
+  </nav>
 </div>
 <div class="sheet" id="sheet" hidden><div class="scrim" id="scrim"></div><div class="panel" id="panel" role="dialog" aria-modal="true"></div></div>
 <div class="toast" id="toast" hidden role="status"><span id="tmsg"></span><button id="tundo">Undo</button></div>

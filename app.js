@@ -121,7 +121,7 @@ function rowHtml(x,where){
   const p=P(x.code),cat=x.cat||(p&&enrich(p).cat)||catOf(typeOf(x));
   return `<div class="row${fresh.has(x.id)?' in':''}" data-row="${x.id}">
     <button class="chk${where==='cart'?' on':''}" data-${where==='cart'?'uncart':'tocart'}="${x.id}" aria-label="${where==='cart'?'Put back on list':'Got it, move to cart'}: ${esc(nameOf(x))}">${where==='cart'?ic('check'):''}</button>
-    <button class="tap" data-qty="${where}:${x.id}">${catIcon(cat)}<span class="nm">${esc(nameOf(x))}${x.qty>1?`<span class="qty">×${x.qty}</span>`:''}</span></button>
+    <button class="tap" data-qty="${where}:${x.id}">${catIcon(cat)}<span class="nm">${esc(nameOf(x))}</span>${x.qty>1?`<span class="qty" style="flex:none;margin-left:-4px">×${x.qty}</span>`:''}</button>
     <button class="del" data-del="${where}:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`;
 }
 function vList(){
@@ -136,9 +136,8 @@ function vList(){
 function vCart(){
   let h=demoBar();
   if(!S.cart.length)return h+`<div class="card empty">${art('cart')}<b>Nothing in your cart yet</b><span class="soft">On your list, tap the circle as you pick things up.</span></div>`;
-  h+=hint('cart','Home from the shops?','Tap "Put it all away" and choose fridge, freezer or pantry for each item.');
+  h+=hint('cart','Home from the shops?','Tap "Put it all away" at the bottom and choose fridge, freezer or pantry for each item.');
   h+=`<div class="card rows">${S.cart.map(x=>rowHtml(x,'cart')).join('')}</div>`;
-  h+=`<button class="btn go wide bigcta" data-putaway>${ic('home')}Put it all away</button>`;
   return h;
 }
 function levelTxt(h){const f=h.rem/h.total;return h.unit==='%'?`${Math.round(f*100)}% left`:`${Math.round(f*100)}% left · ${fmtAmt(h.rem,h.unit)}`}
@@ -157,20 +156,26 @@ function vHome(){
   if(cats.length>1)h+=`<div class="cats" role="group" aria-label="Food type"><button data-cat="all" aria-pressed="${S.cat==='all'}">${`<span class="ci" style="background:#ECEEF1">${ic('all')}</span>`}All</button>${cats.map(c=>`<button data-cat="${c[0]}" aria-pressed="${S.cat===c[0]}">${catIcon(c[0])}${c[1]}</button>`).join('')}</div>`;
   const shown=here.filter(x=>S.cat==='all'||x.cat===S.cat).sort((a,b)=>(a.exp||9e15)-(b.exp||9e15));
   if(!shown.length)return h+`<div class="card empty">${art(S.place)}<b>Your ${PL[S.place].toLowerCase()} is empty</b><span class="soft">Things you put away will show up here.</span></div>`;
-  h+=`<div class="grid">${shown.map(x=>`<div class="item${fresh.has(x.id)?' in':''}" data-item="${x.id}"><button data-open="${x.id}" style="text-align:left;display:flex;flex-direction:column" aria-label="${esc(nameOf(x))}, ${esc(levelTxt(x))}"><span class="pic">${vessel(x.shape,x.rem/x.total,fillOf(x),x.id)}</span><span class="nm">${esc(nameOf(x))}</span><span class="lvl">${Math.round(x.rem/x.total*100)}% left</span><span class="meter"><i style="width:${Math.round(x.rem/x.total*100)}%"></i></span>${expChip(x)}</button><button class="del" data-del="home:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`).join('')}</div>`;
+  h+=`<div class="grid">${shown.map(x=>`<div class="item${fresh.has(x.id)?' in':''}" data-item="${x.id}"><button class="open" data-open="${x.id}" aria-label="${esc(nameOf(x))}, ${esc(levelTxt(x))}"><span class="pic">${vessel(x.shape,x.rem/x.total,fillOf(x),x.id)}</span><span class="nm">${esc(nameOf(x))}</span><span class="lvl">${Math.round(x.rem/x.total*100)}% left</span><span class="meter"><i style="width:${Math.round(x.rem/x.total*100)}%"></i></span></button><div class="foot">${expChip(x)||'<span></span>'}<button class="del" data-del="home:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div></div>`).join('')}</div>`;
   h+=`<form class="add" id="findf" style="margin-top:18px"><input type="search" id="findin" placeholder="Where's my…" aria-label="Find an item at home"><button class="btn sq ghost" aria-label="Find">${ic('search')}</button></form>`;
   return h;
 }
 function render(){
   tabs();
-  [['p-list',vList],['p-cart',vCart],['p-home',vHome]].forEach(([id,fn])=>{const el=$(id),h=fn();if(el._h!==h){const top=el.scrollTop,f=document.activeElement,fid=f&&el.contains(f)&&f.id;el.innerHTML=h;el._h=h;el.scrollTop=top;if(fid&&$(fid))$(fid).focus()}});
-  fresh.clear();
+  // the screen you're looking at updates now; the other two right after, so taps feel instant
+  const pages=[['p-list',vList],['p-cart',vCart],['p-home',vHome]];
+  const draw=([id,fn],i)=>{const el=$(id),h=fn();if(el._h!==h){const top=el.scrollTop,f=document.activeElement,fid=f&&el.contains(f)&&f.id;el.innerHTML=h;el._h=h;el.scrollTop=top;if(fid&&$(fid)&&pages.indexOf(pages.find(p=>p[0]===id))===page)$(fid).focus({preventScroll:true})}};
+  draw(pages[page]);
+  const rest=pages.filter((_,i)=>i!==page),keep=new Set(fresh);
+  clearTimeout(render._t);render._t=setTimeout(()=>{keep.forEach(x=>fresh.add(x));rest.forEach(draw);fresh.clear()},60);
+  fresh.clear();dock();
   save();
 }
 
 /* ================= pager ================= */
 const pager=$('pager');
-function onScroll(){const w=pager.clientWidth||1,f=pager.scrollLeft/w;$('bar').style.transform=`translateX(${f*100}%)`;const p=Math.round(f);if(p!==page){page=p;tabs()}}
+function dock(){const show=page===1&&S.cart.length>0;$('dockput').hidden=!show;$('dock').classList.toggle('two',show)}
+function onScroll(){const w=pager.clientWidth||1,f=pager.scrollLeft/w;$('bar').style.transform=`translateX(${f*100}%)`;const p=Math.round(f);if(p!==page){page=p;const ae=document.activeElement;if(ae&&ae.closest&&ae.closest('.page')&&ae.closest('.page')!==pager.children[p])ae.blur();tabs();dock();if(render._t){clearTimeout(render._t);render._t=0;render()}}}
 pager.addEventListener('scroll',onScroll,{passive:true});
 function goPage(i,smooth=true){pager.scrollTo({left:i*pager.clientWidth,behavior:smooth&&!reduce?'smooth':'auto'})}
 $('tabs').addEventListener('click',e=>{const b=e.target.closest('[data-p]');if(b)goPage(+b.dataset.p)});
@@ -178,10 +183,10 @@ window.addEventListener('resize',()=>goPage(page,false));
 
 /* ================= sheets & toast ================= */
 let viewer=null,onClose=null,undoFn=null,tt=0;
-function open(h,{full=false,close}={}){closeViewer();const p=$('panel');p.style.transform='';p.style.transition='';p.className='panel'+(full?' full':'');p.innerHTML=(full?'':'<div class="grab"></div>')+`<button class="shut" data-close aria-label="Close">${ic('close')}</button>`+h;$('sheet').hidden=false;onClose=close||null;p.scrollTop=0}
-let closing=false;
-function close(){if(closing||$('sheet').hidden)return;closing=true;closeViewer();stopScanner();const p=$('panel'),done=()=>{$('sheet').hidden=true;$('sheet').classList.remove('leaving');p.style.transform='';p.style.transition='';closing=false;const f=onClose;onClose=null;f&&f()};
-  if(reduce)return done();$('sheet').classList.add('leaving');p.style.transition='transform .26s cubic-bezier(.4,0,1,1)';p.style.transform='translateY(105%)';setTimeout(done,240)}
+function open(h,{full=false,close}={}){clearTimeout(closeT);$('toast').hidden=true;$('toast').classList.add('top');if(closing){closing=false;$('sheet').classList.remove('leaving')}closeViewer();const p=$('panel');p.style.transform='';p.style.transition='';p.className='panel'+(full?' full':'');p.innerHTML=(full?'':'<div class="grab"></div>')+`<button class="shut" data-close aria-label="Close">${ic('close')}</button>`+h;$('sheet').hidden=false;onClose=close||null;p.scrollTop=0}
+let closing=false,closeT=0;
+function close(){if(closing||$('sheet').hidden)return;closing=true;$('toast').hidden=true;closeViewer();stopScanner();const p=$('panel'),done=()=>{if(!closing)return;$('sheet').hidden=true;$('sheet').classList.remove('leaving');p.style.transform='';p.style.transition='';closing=false;const f=onClose;onClose=null;f&&f()};
+  if(reduce)return done();$('sheet').classList.add('leaving');p.style.transition='transform .26s cubic-bezier(.4,0,1,1)';p.style.transform='translateY(105%)';closeT=setTimeout(done,240)}
 { // swipe down on a panel to close it
   const p=$('panel');let y0=null,dy=0,t0=0;
   p.addEventListener('touchstart',e=>{if(e.target.closest('.viewer,input,select,.scanv,.cats,.quick'))return;if(p.scrollTop>0)return;y0=e.touches[0].clientY;dy=0;t0=Date.now();p.style.transition='none'},{passive:true});
@@ -189,7 +194,7 @@ function close(){if(closing||$('sheet').hidden)return;closing=true;closeViewer()
   p.addEventListener('touchend',()=>{if(y0==null)return;const fast=dy>60&&Date.now()-t0<250;y0=null;if(dy>130||fast){close()}else{p.style.transition='transform .3s cubic-bezier(.2,.9,.3,1.2)';p.style.transform=''}});
 }
 function closeViewer(){if(viewer){viewer.dispose();viewer=null}}
-function toast(m,u){$('tmsg').textContent=m;undoFn=u||null;$('tundo').hidden=!u;$('toast').hidden=false;clearTimeout(tt);tt=setTimeout(()=>$('toast').hidden=true,u?6000:2800)}
+function toast(m,u){$('tmsg').textContent=m;undoFn=u||null;$('tundo').hidden=!u;const t=$('toast');t.classList.toggle('top',!$('sheet').hidden);t.hidden=false;t.style.animation='none';void t.offsetWidth;t.style.animation='';clearTimeout(tt);tt=setTimeout(()=>$('toast').hidden=true,u?6000:(t.classList.contains('top')?2200:2800))}
 const sheetOpen=()=>!$('sheet').hidden;
 
 /* ================= list & cart actions ================= */
@@ -199,7 +204,8 @@ function addToList(name,code){
   if(same){same.qty++;fresh.add(same.id)}else{const n={id:uid(),...e,qty:1};S.list.unshift(n);fresh.add(n.id)}haptic(10);
   remember(e);
 }
-function animateOut(id,cls,done){const el=document.querySelector(`[data-row="${id}"],[data-item="${id}"]`);if(!el||reduce)return done();el.classList.add(cls);setTimeout(done,260)}
+const busy=new Set();
+function animateOut(id,cls,done){if(busy.has(id))return;busy.add(id);const fin=()=>{busy.delete(id);done()};const el=document.querySelector(`[data-row="${id}"],[data-item="${id}"]`);if(!el||reduce)return fin();el.classList.add(cls);setTimeout(fin,260)}
 function fly(fromEl,toTab){
   if(reduce||!fromEl)return;const a=fromEl.getBoundingClientRect(),b=$(toTab).getBoundingClientRect();
   const g=document.createElement('div');g.className='flyer';g.innerHTML=fromEl.innerHTML;document.body.appendChild(g);
@@ -207,13 +213,13 @@ function fly(fromEl,toTab){
   const dx=b.left+b.width/2-(a.left+a.width/2),dy=b.top+b.height/2-(a.top+a.height/2);
   g.animate([{transform:'translate(0,0) scale(1)',opacity:1},{transform:`translate(${dx*.6}px,${dy*.5-40}px) scale(.8)`,opacity:1,offset:.55},{transform:`translate(${dx}px,${dy}px) scale(.3)`,opacity:.2}],{duration:620,easing:'cubic-bezier(.3,.7,.4,1)'}).onfinish=()=>g.remove();
 }
-function moveToCart(id){const i=S.list.findIndex(x=>x.id===id);if(i<0)return;const x=S.list[i];haptic(15);
+function moveToCart(id){if(busy.has(id))return;const i=S.list.findIndex(x=>x.id===id);if(i<0)return;const x=S.list[i];haptic(15);
   const row=document.querySelector(`[data-row="${id}"] .tap`);fly(row,'t-cart');
-  animateOut(id,'out',()=>{S.list.splice(i,1);S.cart.unshift(x);fresh.add(x.id);render();toast(`${nameOf(x)} is in your cart`,()=>{S.cart=S.cart.filter(y=>y!==x);S.list.splice(i,0,x);fresh.add(x.id)})})}
-function backToList(id){const i=S.cart.findIndex(x=>x.id===id);if(i<0)return;const x=S.cart[i];haptic(12);fly(document.querySelector(`[data-row="${id}"] .tap`),'t-list');
-  animateOut(id,'gone',()=>{S.cart.splice(i,1);S.list.unshift(x);fresh.add(x.id);render();toast(`${nameOf(x)} is back on your list`)})}
-function del(where,id){const arr=S[where],i=arr.findIndex(x=>x.id===id);if(i<0)return;const x=arr[i];haptic(20);
-  animateOut(id,'gone',()=>{arr.splice(i,1);render();toast(`Deleted ${nameOf(x)}`,()=>{arr.splice(i,0,x);fresh.add(x.id)})})}
+  animateOut(id,'out',()=>{const j=S.list.indexOf(x);if(j<0)return;S.list.splice(j,1);S.cart.unshift(x);fresh.add(x.id);render();toast(`${nameOf(x)} is in your cart`,()=>{S.cart=S.cart.filter(y=>y!==x);S.list.splice(i,0,x);fresh.add(x.id)})})}
+function backToList(id){if(busy.has(id))return;const i=S.cart.findIndex(x=>x.id===id);if(i<0)return;const x=S.cart[i];haptic(12);fly(document.querySelector(`[data-row="${id}"] .tap`),'t-list');
+  animateOut(id,'gone',()=>{const j=S.cart.indexOf(x);if(j<0)return;S.cart.splice(j,1);S.list.unshift(x);fresh.add(x.id);render();toast(`${nameOf(x)} is back on your list`)})}
+function del(where,id){if(busy.has(id))return;const arr=S[where],i=arr.findIndex(x=>x.id===id);if(i<0)return;const x=arr[i];haptic(20);
+  animateOut(id,'gone',()=>{const j=arr.indexOf(x);if(j<0)return;arr.splice(j,1);render();toast(`Deleted ${nameOf(x)}`,()=>{arr.splice(i,0,x);fresh.add(x.id)})})}
 function qtySheet(where,id){const x=S[where].find(y=>y.id===id);if(!x)return;
   open(`<h1>${esc(nameOf(x))}</h1><div style="display:flex;align-items:center;justify-content:center;gap:22px;margin:18px 0 22px"><button class="btn ghost sq" data-q="-1" aria-label="Fewer">${ic('minus')}</button><span id="qv" style="font-size:48px;font-weight:700;min-width:60px;text-align:center">${x.qty}</span><button class="btn ghost sq" data-q="1" aria-label="More">${ic('plus')}</button></div>
    <div class="acts"><button class="btn ghost" data-del="${where}:${x.id}" data-andclose>${ic('trash')}Delete</button><button class="btn" data-close>Done</button></div>`);
@@ -246,6 +252,7 @@ async function detail(id){
   const it=S.home.find(x=>x.id===id);if(!it)return;
   open(`<div class="viewer" id="vw"><span class="hint2">Drag to turn · pinch to zoom</span></div><div id="dbody"></div>`);
   drawDetail(it);
+  await new Promise(r=>setTimeout(r,reduce?0:300));if(!$('vw'))return;
   try{const mv=(await import('./viewer.js')).mountViewer;const p=P(it.code);if($('vw')&&sheetOpen()){closeViewer();viewer=mv($('vw'),{shape:it.shape,level:it.rem/it.total,color:fillOf(it),brand:p&&p.brand,name:nameOf(it),label:p&&p.label,image:p&&p.image})}}
   catch(e){const v=$('vw');if(v)v.insertAdjacentHTML('beforeend',`<div style="position:absolute;inset:16px;display:grid;place-items:center">${vessel(it.shape,it.rem/it.total,fillOf(it))}</div>`)}
 }
@@ -322,8 +329,8 @@ function drawTray(){
   const order=[[0,'list','Add to list'],[1,'cart','Add to cart'],[2,'home','Put away']];
   order.sort((a,b)=>(a[0]===SC.from?-1:0)-(b[0]===SC.from?-1:0));
   r.innerHTML=typeForm+`<h2>${S.scanMode==='one'?'Scanned':`Scanned · ${items.reduce((s,t)=>s+t.qty,0)}`}</h2><div class="card rows tray">${items.map((t,i)=>{const n=trayName(t),c=n?(P(t.code)?enrich(P(t.code)).cat:catOf(guessType(n))):'other';
-      return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div class="tap">${catIcon(c)}<span class="nm">${t.st==='loading'?'<span class="spin"></span> Looking up…':n?esc(n):'Unknown item'}${t.qty>1?`<span class="qty">×${t.qty}</span>`:''}${t.st==='unknown'&&!n?`<br><span class="small">${esc(t.code)}</span>`:''}</span></div>
-      <span style="display:flex;gap:4px">${t.st==='unknown'&&!n?`<button class="btn ghost" style="min-height:48px;font-size:16px;padding:0 12px" data-nameit="${i}">Name it</button>`:''}<button class="del" data-untray="${i}" aria-label="Remove">${ic('trash')}</button></span></div>`}).join('')}</div>
+      return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div class="tap">${catIcon(c)}<span class="nm">${t.st==='loading'?'<span class="spin"></span> Looking up…':n?esc(n):'Unknown item'}${t.qty>1?`<span class="qty">×${t.qty}</span>`:''}${t.st==='unknown'&&!n?`<span class="small" style="display:block;overflow-wrap:anywhere">${esc(t.code)}</span><button class="btn ghost" style="min-height:44px;font-size:16px;padding:0 14px;margin-top:6px" data-nameit="${i}">Name it</button>`:''}</span></div>
+      <button class="del" data-untray="${i}" aria-label="Remove">${ic('trash')}</button></div>`}).join('')}</div>
     <div style="display:grid;gap:10px;margin-top:14px">${order.map(([p,k,l],j)=>`<button class="btn ${j===0?(k==='home'?'go':''):'ghost'} wide" data-send="${k}">${ic(k)}${l}</button>`).join('')}</div>`;
   bindType();
 }
@@ -417,13 +424,14 @@ async function onSignedIn(u){
 
 /* ================= events ================= */
 $('fab').onclick=scanSheet;
+$('dockput').onclick=()=>putAwaySheet(S.cart.map(x=>({...x,from:'cart'})));
 $('gear').onclick=settings;
 $('scrim').onclick=close;
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&sheetOpen())close()});
 $('tundo').onclick=()=>{if(undoFn){undoFn();undoFn=null;render()}$('toast').hidden=true};
 $('file').onchange=async()=>{const f=$('file').files[0];$('file').value='';if(!f)return;toast('Reading barcode…');try{const c=await decodeImage(f);if(c){$('toast').hidden=true;if(!sheetOpen()||!$('sres'))scanSheet();gotCode(c)}else toast('No barcode found. Try closer, in good light.')}catch(e){toast('Couldn\'t read that photo')}};
 document.addEventListener('submit',e=>{
-  if(e.target.id==='addf'){e.preventDefault();const v=$('addin').value.trim();if(!v)return;addToList(v);render();const i=$('addin');i.focus()}
+  if(e.target.id==='addf'){e.preventDefault();const v=$('addin').value.trim();if(!v)return;addToList(v);render();const i=$('addin');i.focus({preventScroll:true})}
   if(e.target.id==='findf'){e.preventDefault();const q=$('findin').value.toLowerCase().trim();if(!q)return;const hit=S.home.find(x=>(nameOf(x)+' '+x.type).toLowerCase().includes(q));
     if(hit){S.place=hit.place;S.cat='all';render();toast(`${nameOf(hit)} is in the ${PL[hit.place].toLowerCase()}`);setTimeout(()=>{const el=document.querySelector(`[data-item="${hit.id}"]`);if(el){el.scrollIntoView({block:'center',behavior:reduce?'auto':'smooth'});el.style.outline='4px solid var(--ink)';setTimeout(()=>el.style.outline='',1800)}},60)}
     else toast(`No “${q}” at home`)}
@@ -458,5 +466,6 @@ let S=load();
 render();
 requestAnimationFrame(()=>{onScroll()});
 if(!S.onboarded)setTimeout(()=>welcome(0),350);
+(window.requestIdleCallback||(f=>setTimeout(f,2500)))(()=>import('./viewer.js').catch(()=>{}));
 if(cloud.enabled()){cloud.onAuth(async u=>{const was=ME&&ME.id;ME=u;if(u&&u.id!==was){await onSignedIn(u);if(/[?&]code=/.test(location.search))history.replaceState(null,'',location.pathname);toast('Signed in')}render()})}
 if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
