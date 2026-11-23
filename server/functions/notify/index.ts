@@ -71,9 +71,9 @@ async function push(userId: string, title: string, body: string) {
 
 async function email(to: string, subject: string, alerts: Alert[]) {
   if (!env('RESEND_API_KEY') || !to) return false;
-  const html = `<div style="font-family:Georgia,serif;color:#1d1419;max-width:520px;margin:auto;padding:24px">
+  const html = `<div style="font-family:Georgia,serif;color:#14171C;max-width:520px;margin:auto;padding:24px">
     <h1 style="font-weight:600;font-size:28px;margin:0 0 16px">Flogger</h1>
-    ${alerts.map(a => `<div style="background:#f7f0f2;border-radius:16px;padding:14px 16px;margin:0 0 10px;font-family:Helvetica,Arial,sans-serif"><strong>${a.title}</strong><br><span style="color:#6f6268">${a.body}</span></div>`).join('')}
+    ${alerts.map(a => `<div style="background:#F4F5F7;border-radius:16px;padding:14px 16px;margin:0 0 10px;font-family:Helvetica,Arial,sans-serif"><strong>${a.title}</strong><br><span style="color:#454C58">${a.body}</span></div>`).join('')}
     <p style="font-family:Helvetica,Arial,sans-serif"><a href="${APP_URL}" style="color:#0B5FA5">Open Flogger</a></p>
     <p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a7a82">You get this because email reminders are on in Flogger settings.</p></div>`;
   const r = await fetch('https://api.resend.com/emails', {method: 'POST', headers: {Authorization: `Bearer ${env('RESEND_API_KEY')}`, 'Content-Type': 'application/json'},
@@ -112,7 +112,7 @@ Deno.serve(async req => {
     const {data: done} = await db.from('notif_log').select('key').eq('user_id', prof.user_id).in('key', all.map(a => a.key));
     const fresh = all.filter(a => !(done ?? []).some((d: any) => d.key === a.key));
     if (!fresh.length) continue;
-    const title = fresh.length === 1 ? fresh[0].title : `${fresh.length} things in your larder need you`;
+    const title = fresh.length === 1 ? fresh[0].title : `${fresh.length} things at home need you`;
     const text = fresh.length === 1 ? fresh[0].body : fresh.map(a => a.title).join(' · ');
     if (prof.notify_push) await push(prof.user_id, title, text);
     if (prof.notify_email) await email(prof.email, title, fresh);
