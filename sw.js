@@ -1,5 +1,5 @@
 // App shell works offline; live data (products, stores, recipes) always goes to the network.
-const CACHE='larder-v3';
+const CACHE='flogger-v1';
 const SHELL=['./','index.html','styles.css','app.js','data.js','scanner.js','viewer.js','vendor/three.module.min.js','vendor/OrbitControls.js','vendor/zxing.min.js','vendor/supabase.js','cloud.js','config.js','manifest.webmanifest','icons/icon-192.png','icons/icon-512.png'];
 self.addEventListener('install',e=>{e.waitUntil(caches.open(CACHE).then(c=>c.addAll(SHELL)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim()))});
@@ -11,8 +11,8 @@ self.addEventListener('fetch',e=>{
 });
 
 self.addEventListener('push',e=>{
-  let d={};try{d=e.data.json()}catch(_){d={title:'Larder',body:e.data?e.data.text():''}}
-  e.waitUntil(self.registration.showNotification(d.title||'Larder',{body:d.body||'',icon:'icons/icon-192.png',badge:'icons/icon-192.png',data:{url:d.url||'./'},tag:'larder'}));
+  let d={};try{d=e.data.json()}catch(_){d={title:'Flogger',body:e.data?e.data.text():''}}
+  e.waitUntil(self.registration.showNotification(d.title||'Flogger',{body:d.body||'',icon:'icons/icon-192.png',badge:'icons/icon-192.png',data:{url:d.url||'./'},tag:'larder'}));
 });
 self.addEventListener('notificationclick',e=>{
   e.notification.close();

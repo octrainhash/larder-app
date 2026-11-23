@@ -1,534 +1,445 @@
-import {COUNTRIES,detectCountry,money as fmtMoney,parseQty,fmtAmt,guessType,guessShape,SHAPES,lookupProduct,here,nearbyStores,recipesFor,recipeDetail} from './data.js';
+import {parseQty,fmtAmt,guessType,guessShape,SHAPES,lookupProduct} from './data.js';
 import {startScan,decodeImage} from './scanner.js';
 import * as cloud from './cloud.js';
-let ME=null,repCache={};
 
 /* ================= state ================= */
-const KEY='larder.v2',DAY=864e5;
-const blank=()=>({v:2,country:detectCountry(),onboarded:false,store:null,stores:[],locs:[],auto:null,showAv:true,products:{},pending:[],collected:[],purchases:[],home:[]});
-function load(){try{const r=localStorage.getItem(KEY);if(r)return Object.assign(blank(),JSON.parse(r))}catch(e){}return blank()}
-let S=load();
+const KEY='flogger.v1',OLD='larder.v2',DAY=864e5;
+const blank=()=>({v:3,onboarded:false,list:[],cart:[],home:[],products:{},recent:[],hints:{},auto:null,scanMode:'multi',place:'fridge',cat:'all'});
+function migrate(o){
+  const S=blank();S.onboarded=!!o.onboarded;S.products=o.products||{};S.auto=o.auto??null;
+  S.list=(o.pending||[]).map(x=>({id:x.id,code:x.code||null,name:x.name||null,qty:x.qty||1}));
+  S.cart=(o.collected||[]).map(x=>({id:x.id,code:x.code||null,name:x.name||null,qty:x.qty||1}));
+  S.home=(o.home||[]).map(h=>{const type=h.type||'item',cat=catOf(type),loc=(h.loc||'').toLowerCase();
+    return {...h,cat,place:loc.includes('freez')?'freezer':loc.includes('fridge')?'fridge':loc?'pantry':placeFor(cat,type)}});
+  return S;
+}
+function load(){try{const r=localStorage.getItem(KEY);if(r)return Object.assign(blank(),JSON.parse(r));const o=localStorage.getItem(OLD);if(o)return migrate(JSON.parse(o))}catch(e){}return blank()}
+let ME=null;
 function save(){S.updatedAt=Date.now();try{localStorage.setItem(KEY,JSON.stringify(S))}catch(e){}if(ME&&S.syncUser===ME.id)cloud.pushState(ME.id,S)}
 
 /* ================= helpers ================= */
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-const money=n=>fmtMoney(n,S.country);
 const now=()=>Date.now();
 const P=code=>code?S.products[code]:null;
 const title=p=>p?[p.brand,p.name].filter(Boolean).join(' '):'';
+const nameOf=x=>{const p=P(x.code);return p?title(p):(x.name||'Item')};
 const keyOf=x=>x.code||('n:'+String(x.name||'').toLowerCase().trim());
-const nameOf=x=>{const p=P(x.code);return p?title(p):x.name};
-const nameHtml=x=>{const p=P(x.code);return p?`${esc(title(p))}${p.label?` <em>${esc(p.label)}</em>`:''}`:esc(x.name)};
+const typeOf=x=>{const p=P(x.code);return x.type||(p&&p.type)||guessType(x.name||'')};
 const days=t=>Math.round((new Date(t).setHours(0,0,0,0)-new Date().setHours(0,0,0,0))/DAY);
-const expTxt=t=>{if(!t)return 'No expiry date';const d=days(t);return d<0?`Expired ${-d} day${d===-1?'':'s'} ago`:d===0?'Expires today':d===1?'Expires tomorrow':d>90?'Expires '+new Date(t).toLocaleDateString(undefined,{month:'short',year:'numeric'}):`Expires in ${d} days`};
-const ago=t=>{const d=-days(t);return d<=0?'today':d===1?'yesterday':d<30?d+' days ago':new Date(t).toLocaleDateString(undefined,{day:'numeric',month:'short'})};
-const dstr=t=>new Date(t).toLocaleDateString(undefined,{day:'numeric',month:'short'});
 const dkey=t=>{const d=new Date(t);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')};
-const rv=i=>`data-rv style="--i:${i}"`;
-const COLORS={milk:'#f1ece2',cream:'#f4eee3',yogurt:'#f5f0e8',juice:'#f0a640',orange:'#f0a640',oil:'#c9a43a','olive oil':'#b9a032',water:'#cfe6f2',soda:'#5a2e1c',cola:'#4a2416',coffee:'#6b4430',tea:'#a8703c',spinach:'#6fa860',lettuce:'#8cbf6e',rice:'#efe9dc',sugar:'#f3efe7',salt:'#f3f1ee',flour:'#f3eee4',pasta:'#e2c27a',penne:'#e2c27a',spaghetti:'#e2c27a',noodle:'#e8cf8a',cereal:'#d9b77a',oats:'#dcc392',bread:'#c9955c',egg:'#e8d3b4',cheese:'#efc25a',cheddar:'#efb64a',butter:'#f3dc8a',tomato:'#c8432f',honey:'#e0a42c',jam:'#9c2a3d',chocolate:'#5b3423',beans:'#8a5a3c',chips:'#e8c069',ketchup:'#b5281e',chicken:'#f0c9b0',beef:'#a8443a'};
-const colorOf=t=>COLORS[t]||'#cdb3c1';
+const cap=s=>s?s[0].toUpperCase()+s.slice(1):s;
+const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-/* thumbnails for lists */
+/* ================= icons & pictures ================= */
+const I={
+ list:'<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
+ cart:'<path d="M3 4h2l2.4 11.2a2 2 0 0 0 2 1.6h7.7a2 2 0 0 0 2-1.5L21 8H6.2"/><circle cx="9.5" cy="20.5" r="1.3"/><circle cx="17.5" cy="20.5" r="1.3"/>',
+ home:'<path d="M3 11l9-7 9 7M5 10v10h14V10"/>',
+ plus:'<path d="M12 5v14M5 12h14"/>',minus:'<path d="M5 12h14"/>',
+ trash:'<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+ check:'<path d="M5 12.5l4.5 4.5L19 7"/>',close:'<path d="M6 6l12 12M18 6L6 18"/>',
+ clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',warn:'<path d="M12 3l10 18H2zM12 10v4M12 17.5h.01"/>',
+ search:'<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',camera:'<path d="M4 8h3l2-3h6l2 3h3v12H4z"/><circle cx="12" cy="13" r="3.5"/>',
+ back:'<path d="M15 5l-7 7 7 7"/>',
+ fridge:'<rect x="6" y="2.5" width="12" height="19" rx="2"/><path d="M6 10h12M9 5.5v2M9 13v3"/>',
+ freezer:'<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M12 7.5v9M8.2 9.7l7.6 4.6M8.2 14.3l7.6-4.6"/>',
+ pantry:'<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 9h16M4 15h16M8 6h2M14 12h2M9 18h2"/>',
+ dairy:'<path d="M8 3h8v3l2 3v12H6V9l2-3z"/><path d="M6 9h12"/>',
+ meat:'<path d="M14.5 4.5a5 5 0 0 1 5 5c0 3.5-3.5 6-7 5.5l-3.6 3.6a2.2 2.2 0 1 1-3-3l3.6-3.6c-.5-3.5 1.5-7.5 5-7.5z"/>',
+ produce:'<path d="M12 8c-2-2.2-7-1.6-7 3.5 0 4 3 9 5 9 .9 0 1.2-.5 2-.5s1.1.5 2 .5c2 0 5-5 5-9 0-5.1-5-5.7-7-3.5z"/><path d="M12 8c0-2 .8-3.6 3-4.5"/>',
+ bakery:'<path d="M5 11a3.5 3.5 0 0 1 0-7h14a3.5 3.5 0 0 1 0 7v9H5z"/><path d="M9 7.5v3M13 7.5v3"/>',
+ snacks:'<circle cx="12" cy="12" r="8.5"/><path d="M9 9h.01M14.5 9.5h.01M9.5 14.5h.01M15 15h.01M12 12h.01"/>',
+ drinks:'<path d="M10 2.5h4v3.5l2 3v12.5H8V9l2-3z"/><path d="M8 13h8"/>',
+ frozen:'<path d="M12 2.5v19M3.8 7.2l16.4 9.6M3.8 16.8l16.4-9.6M9.5 4.5L12 7l2.5-2.5M9.5 19.5L12 17l2.5 2.5"/>',
+ grains:'<path d="M7 8h10v12a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1z"/><path d="M8 4h8v4H8zM7 13h10"/>',
+ jars:'<path d="M6 5.5C6 4.4 8.7 3.5 12 3.5s6 .9 6 2v13c0 1.1-2.7 2-6 2s-6-.9-6-2z"/><path d="M6 5.5c0 1.1 2.7 2 6 2s6-.9 6-2M6 12c0 1.1 2.7 2 6 2s6-.9 6-2"/>',
+ other:'<circle cx="6" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="18" cy="12" r="1.3"/>',
+ all:'<rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/>',
+ scan:'<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 8v8M11 8v8M14 8v8M17 8v8"/>',
+ photo:'<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-8 8"/>',
+ keys:'<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>'
+};
+const ic=(n,c='i')=>`<svg class="${c}" viewBox="0 0 24 24" aria-hidden="true">${I[n]||I.other}</svg>`;
+
+const CATS=[['dairy','Dairy & eggs','#E3EEF9'],['meat','Meat & fish','#FBDCCB'],['produce','Fruit & veg','#D5F0E6'],['bakery','Bread','#F6E7CF'],['snacks','Snacks','#FFF1C2'],['drinks','Drinks','#DCEFFA'],['frozen','Frozen','#E2E6FA'],['grains','Pasta & grains','#EFE8DA'],['jars','Cans & jars','#F1E2EE'],['other','Other','#ECEEF1']];
+const CAT=Object.fromEntries(CATS.map(c=>[c[0],{name:c[1],tint:c[2]}]));
+const T2C={milk:'dairy',cream:'dairy',yogurt:'dairy',cheese:'dairy',cheddar:'dairy',mozzarella:'dairy',butter:'dairy',egg:'dairy',
+ chicken:'meat',beef:'meat',pork:'meat',fish:'meat',salmon:'meat',tuna:'jars',
+ spinach:'produce',lettuce:'produce',apple:'produce',banana:'produce',orange:'produce',lemon:'produce',potato:'produce',onion:'produce',garlic:'produce',carrot:'produce',tomato:'produce',
+ bread:'bakery',tortilla:'bakery',chips:'snacks',biscuit:'snacks',cookie:'snacks',crackers:'snacks',chocolate:'snacks',
+ juice:'drinks',water:'drinks',soda:'drinks',cola:'drinks',coffee:'drinks',tea:'drinks','ice cream':'frozen',frozen:'frozen',
+ rice:'grains',pasta:'grains',spaghetti:'grains',penne:'grains',noodle:'grains',flour:'grains',sugar:'grains',oats:'grains',cereal:'grains',salt:'grains',pepper:'grains',
+ beans:'jars',lentils:'jars',chickpeas:'jars',ketchup:'jars',mayonnaise:'jars',mustard:'jars',jam:'jars',honey:'jars',oil:'jars','olive oil':'jars',vinegar:'jars'};
+function catOf(type){return T2C[type]||(type&&T2C[type.replace(/s$/,'')])||'other'}
+const COOL=new Set(['dairy','meat']);
+function placeFor(cat,type){if(cat==='frozen')return 'freezer';if(COOL.has(cat))return 'fridge';if(cat==='produce')return ['potato','onion','garlic','banana'].includes(type)?'pantry':'fridge';return 'pantry'}
+const PLACES=[['fridge','Fridge'],['freezer','Freezer'],['pantry','Pantry']];
+const PL=Object.fromEntries(PLACES);
+const catIcon=(c,size)=>`<span class="ci" style="background:${(CAT[c]||CAT.other).tint}${size?';width:'+size+'px;height:'+size+'px':''}">${ic(c)}</span>`;
+
+function art(kind){
+  const s='stroke="#14171C" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"';
+  if(kind==='fridge')return `<svg class="art" viewBox="0 0 120 100" aria-hidden="true"><ellipse cx="60" cy="96" rx="34" ry="3" fill="#14171C" opacity=".12"/><rect x="32" y="5" width="56" height="88" rx="9" fill="#CDE8F8" ${s}/><path d="M32 37h56" ${s}/><path d="M78 16v12M78 46v20" stroke="#14171C" stroke-width="4" stroke-linecap="round"/><rect x="40" y="46" width="14" height="10" rx="2" fill="#E69F00" ${s} stroke-width="1.8"/><circle cx="46" cy="20" r="4" fill="#009E73" ${s} stroke-width="1.8"/></svg>`;
+  if(kind==='freezer')return `<svg class="art" viewBox="0 0 120 100" aria-hidden="true"><ellipse cx="60" cy="96" rx="36" ry="3" fill="#14171C" opacity=".12"/><rect x="28" y="8" width="64" height="85" rx="9" fill="#BCD6EE" ${s}/><path d="M28 36h64M28 64h64" ${s}/><path d="M52 50h16M52 78h16" stroke="#14171C" stroke-width="4" stroke-linecap="round"/><g ${s} stroke-width="2.2"><path d="M60 13v18M52 17.5l16 9M52 26.5l16-9"/></g></svg>`;
+  if(kind==='pantry')return `<svg class="art" viewBox="0 0 120 100" aria-hidden="true"><ellipse cx="60" cy="96" rx="42" ry="3" fill="#14171C" opacity=".12"/><rect x="18" y="6" width="84" height="87" rx="7" fill="#FBE6BB" ${s}/><path d="M18 34h84M18 63h84" ${s}/><g ${s} stroke-width="1.8"><rect x="28" y="17" width="12" height="17" rx="3" fill="#E69F00"/><rect x="45" y="13" width="10" height="21" rx="2" fill="#F0E4E9"/><rect x="62" y="20" width="14" height="14" rx="2" fill="#009E73"/><rect x="82" y="15" width="10" height="19" rx="3" fill="#CC79A7"/><rect x="30" y="46" width="16" height="17" rx="2" fill="#56B4E9"/><rect x="52" y="43" width="12" height="20" rx="3" fill="#D55E00"/><rect x="70" y="49" width="20" height="14" rx="3" fill="#F0E442"/><rect x="30" y="74" width="24" height="12" rx="3" fill="#EFE8DA"/><rect x="62" y="70" width="12" height="16" rx="3" fill="#0072B2"/></g></svg>`;
+  if(kind==='list')return `<svg class="art" viewBox="0 0 150 120" aria-hidden="true"><rect x="40" y="10" width="70" height="100" rx="8" fill="#fff" ${s}/><rect x="60" y="4" width="30" height="12" rx="4" fill="#E69F00" ${s}/><g ${s}><circle cx="55" cy="40" r="5" fill="#D5F0E6"/><path d="M66 40h30"/><circle cx="55" cy="60" r="5" fill="#fff"/><path d="M66 60h30"/><circle cx="55" cy="80" r="5" fill="#fff"/><path d="M66 80h22"/></g></svg>`;
+  if(kind==='cart')return `<svg class="art" viewBox="0 0 150 120" aria-hidden="true"><g ${s}><path d="M20 22h14l12 56h62l12-42H40" fill="none"/><path d="M42 36h78l-10 38H50z" fill="#E3EEF9"/><rect x="58" y="16" width="16" height="26" rx="3" fill="#D5F0E6"/><rect x="78" y="22" width="20" height="20" rx="3" fill="#FFE9B8"/><circle cx="56" cy="94" r="7" fill="#fff"/><circle cx="100" cy="94" r="7" fill="#fff"/></g></svg>`;
+  if(kind==='home')return `<svg class="art" viewBox="0 0 150 120" aria-hidden="true"><g transform="translate(15 10)">${art('fridge').replace(/<svg[^>]*>|<\/svg>/g,'')}</g></svg>`;
+  return '';
+}
 const SH={carton:['M22 36 L40 16 L58 36 L58 112 Q58 116 54 116 L26 116 Q22 116 22 112 Z',36,116],jug:['M32 16 h16 v12 q18 6 18 24 v60 q0 4 -4 4 h-44 q-4 0 -4 -4 v-60 q0 -18 18 -24 Z',30,116],bottle:['M35 6 h10 v20 q12 8 12 24 v62 q0 4 -4 4 h-26 q-4 0 -4 -4 v-62 q0 -16 12 -24 Z',30,116],tub:['M12 44 h56 l-5 68 q-1 4 -5 4 h-36 q-4 0 -5 -4 Z',44,116],jar:['M18 34 h44 v6 q4 4 4 10 v60 q0 6 -6 6 h-40 q-6 0 -6 -6 v-60 q0 -6 4 -10 Z',40,116],box:['M18 28 h44 v84 q0 4 -4 4 h-36 q-4 0 -4 -4 Z',28,116],bag:['M18 26 q22 -10 44 0 l5 84 q0 6 -6 6 h-42 q-6 0 -6 -6 Z',22,116],can:['M20 34 q20 -8 40 0 v76 q-20 8 -40 0 Z',30,116]};
+const FILLS={dairy:'#F2EEE6',meat:'#E9A38A',produce:'#7FBF6A',bakery:'#D9A066',snacks:'#F0C44C',drinks:'#E69F00',frozen:'#9CC3EA',grains:'#E8D39A',jars:'#C2452D',other:'#B9A7C9'};
+const TFILL={milk:'#F2EEE6',yogurt:'#F5F1EA',egg:'#E8CFA9',juice:'#F0A640',orange:'#F0A640',oil:'#C9A43A','olive oil':'#B59A2C',water:'#BFE3F5',coffee:'#7A4E35',tea:'#B07A45',tomato:'#C8432F',ketchup:'#B5281E','ice cream':'#F6D9E4',rice:'#F1ECDF',cheese:'#F0C25A',cheddar:'#EDB54A',butter:'#F3DC8A',chocolate:'#6B3E2A'};
 let vid=0;
 function vessel(shape,lvl,color){
   const [d,t,b]=SH[shape]||SH.bag,id='v'+(++vid),y=t+(1-Math.max(0,Math.min(1,lvl)))*(b-t);
-  return `<svg viewBox="0 0 80 124" aria-hidden="true"><defs><clipPath id="${id}"><path d="${d}"/></clipPath><linearGradient id="${id}g" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset=".5" stop-color="#fff" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".14"/></linearGradient></defs>
-  <ellipse cx="40" cy="119" rx="26" ry="3.5" fill="#3b1d2c" opacity=".12"/><path d="${d}" fill="var(--g2)"/>
-  <g clip-path="url(#${id})"><rect x="0" y="${y}" width="80" height="${124-y}" fill="${color}"/><rect x="0" y="${y}" width="80" height="2" fill="#fff" opacity=".5"/><rect width="80" height="124" fill="url(#${id}g)"/><rect x="25" y="${t+6}" width="2.6" height="${(b-t)*.55}" rx="1.3" fill="#fff" opacity=".7"/></g>
-  <path d="${d}" fill="none" stroke="currentColor" stroke-opacity=".3" stroke-width="1.2"/></svg>`;
+  return `<svg viewBox="0 0 80 124" aria-hidden="true"><defs><clipPath id="${id}"><path d="${d}"/></clipPath></defs><ellipse cx="40" cy="119" rx="26" ry="3.5" fill="#14171C" opacity=".12"/><path d="${d}" fill="#F4F5F7"/>
+  <g clip-path="url(#${id})"><rect x="0" y="${y}" width="80" height="${124-y}" fill="${color}"/><rect x="0" y="${y}" width="80" height="2.5" fill="#14171C" opacity=".35"/><rect x="24" y="${t+6}" width="3" height="${(b-t)*.5}" rx="1.5" fill="#fff" opacity=".8"/></g>
+  <path d="${d}" fill="none" stroke="#14171C" stroke-width="2.2"/></svg>`;
 }
+const fillOf=h=>TFILL[h.type]||FILLS[h.cat]||FILLS.other;
 
-/* ================= purchases & prices (real records only) ================= */
-const priced=k=>S.purchases.filter(p=>keyOf(p)===k&&p.price!=null).sort((a,b)=>b.t-a.t);
-const lastPaid=k=>priced(k)[0]||null;
-const lastBought=k=>S.purchases.filter(p=>keyOf(p)===k&&p.store).sort((a,b)=>b.t-a.t)[0]||null;
-function spent(from,to){return S.purchases.filter(p=>p.t>=from&&p.t<to&&p.price!=null).reduce((s,p)=>s+p.price*p.qty,0)}
-function savedSince(from){let s=0;const last={};[...S.purchases].filter(p=>p.price!=null).sort((a,b)=>a.t-b.t).forEach(p=>{const k=keyOf(p);if(last[k]!=null&&p.price<last[k]&&p.t>=from)s+=(last[k]-p.price)*p.qty;last[k]=p.price});return s}
-const monthStart=(o=0)=>{const d=new Date();return new Date(d.getFullYear(),d.getMonth()-o,1).getTime()};
+/* ================= categorising products ================= */
+function enrich(p){if(!p)return p;if(!p.cat)p.cat=catOf(p.type);return p}
+function entry(code,name){const p=P(code);const type=p?p.type:guessType(name||'');return {code:code||null,name:p?null:name,type,cat:p?enrich(p).cat:catOf(type)}}
+function remember(x){const k=keyOf(x);S.recent=[{code:x.code||null,name:x.code?null:x.name,type:typeOf(x)},...S.recent.filter(r=>keyOf(r)!==k)].slice(0,24)}
 
-function insights(code,shelf,store){
-  const p=P(code),out=[];if(!p)return out;
-  const home=S.home.filter(h=>h.rem>0&&(h.code===code||(p.type&&h.type===p.type)));
-  const best=home.sort((a,b)=>b.rem/b.total-a.rem/a.total)[0];
-  if(best&&best.rem/best.total>=.5)out.push({c:'warn',dup:1,h:'You already have this at home',t:`About ${Math.round(best.rem/best.total*100)}% of ${esc(best.code?title(P(best.code)):best.name)} is left, in ${esc(best.loc)}.`});
-  const hist=priced(code),lp=hist[0];
-  if(shelf>0&&lp){
-    if(shelf<lp.price-.004)out.push({c:'good',h:`You save ${money(lp.price-shelf)} vs last time`,t:`You paid ${money(lp.price)}${lp.store?' at '+esc(lp.store):''} on ${dstr(lp.t)}.`,stock:1});
-    else if(shelf>lp.price+.004)out.push({c:'',h:`${money(shelf-lp.price)} more than last time`,t:`You paid ${money(lp.price)}${lp.store?' at '+esc(lp.store):''} on ${dstr(lp.t)}.`});
-  }
-  if(shelf>0){const cheaper=hist.filter(h=>h.store&&h.store!==store&&h.price<shelf-.004).sort((a,b)=>a.price-b.price)[0];
-    if(cheaper&&cheaper!==lp)out.push({c:'',h:`You've paid less at ${esc(cheaper.store)}`,t:`${money(cheaper.price)} on ${dstr(cheaper.t)}, vs ${money(shelf)} here.`})}
-  if(shelf>0&&p.size&&p.brand){
-    let bestV=null;
-    Object.values(S.products).forEach(q=>{if(q.code===code||q.brand!==p.brand||q.type!==p.type||!q.size||q.unit!==p.unit)return;
-      const h=priced(q.code)[0];if(!h)return;const n=Math.ceil(p.size/q.size-1e-9),cost=n*h.price;
-      if(cost<shelf-.004&&(!bestV||cost<bestV.cost))bestV={n,cost,q,h}});
-    if(bestV)out.push({c:'good',h:`Better value: save ${money(shelf-bestV.cost)}`,t:`${bestV.n>1?bestV.n+' × ':''}${esc(title(bestV.q))} ${esc(bestV.q.label||'')} cost ${money(bestV.cost)}${bestV.h.store?' at '+esc(bestV.h.store):''} (${dstr(bestV.h.t)}), vs ${money(shelf)} for this.`});
-  }
-  const n60=S.purchases.filter(x=>x.code===code&&x.t>now()-60*DAY).reduce((s,x)=>s+x.qty,0);
-  if(n60>=3){const avg=hist.length?hist.reduce((s,x)=>s+x.price,0)/hist.length:null;
-    const k=Math.min(4,Math.ceil(n60/4));
-    out.push({c:shelf>0&&avg&&shelf<avg-.004?'good':'',h:`You've bought this ${n60} times in 60 days`,t:shelf>0&&avg&&shelf<avg-.004?`It's below your average of ${money(avg)} today. Getting ${k} now saves trips.`:`Getting ${k} at a time would save trips.`,stock:k});
-  }
-  return out;
+/* ================= rendering ================= */
+let page=0;
+function tabs(){
+  const lab=[['list','List',S.list.length],['cart','In cart',S.cart.length],['home','At home',S.home.length]];
+  lab.forEach(([k,l,n],i)=>{const b=$('t-'+k);b.innerHTML=`${ic(k)}${l}${n?`<span class="n">${n}</span>`:''}`;b.setAttribute('aria-selected',String(i===page))});
 }
+function hint(k,title,text){if(S.hints[k])return '';return `<div class="hint" role="note"><div><b>${title}</b>${text}</div><button data-hint="${k}" aria-label="Got it">${ic('close')}</button></div>`}
+function demoBar(){return S.home.concat(S.list,S.cart).some(x=>x.demo)?`<div class="demo"><span>These are sample items</span><button class="btn ghost" data-cleardemo>Clear them</button></div>`:''}
 
-/* ================= shell ================= */
-let tab=location.hash.slice(1)||'list',seg='pending',undoFn=null,tt=0,stopCam=null,viewer=null;
-if(!['list','home','scan','recipes','receipts','savings'].includes(tab))tab='list';
-const scanState={code:null,loading:false,err:null,shelf:'',notFound:false};
-
-function header(){const s=savedSince(monthStart());$('savepill').textContent=`${money(s)} saved`}
-function go(t){if(t!==tab){if(stopCam){stopCam();stopCam=null}tab=t;history.replaceState(null,'','#'+t)}render(true);$('main').scrollTop=0}
-function render(anim){
-  header();
-  document.querySelectorAll('#nav button').forEach(b=>{b.dataset.t===tab?b.setAttribute('aria-current','page'):b.removeAttribute('aria-current')});
-  const m=$('main');
-  m.innerHTML=({list:vList,home:vHome,scan:vScan,recipes:vRecipes,receipts:vReceipts,savings:vSavings})[tab]();
-  if(anim){m.classList.remove('enter');void m.offsetWidth;m.classList.add('enter');clearTimeout(m._t);m._t=setTimeout(()=>m.classList.remove('enter'),1400)}
-  if(tab==='recipes')loadRecipes();
-  if(tab==='receipts')loadReceiptThumbs();
+function rowHtml(x,where){
+  const p=P(x.code),cat=x.cat||(p&&enrich(p).cat)||catOf(typeOf(x));
+  return `<div class="row" data-row="${x.id}">
+    <button class="chk${where==='cart'?' on':''}" data-${where==='cart'?'uncart':'tocart'}="${x.id}" aria-label="${where==='cart'?'Put back on list':'Got it, move to cart'}: ${esc(nameOf(x))}">${where==='cart'?ic('check'):''}</button>
+    <button class="tap" data-qty="${where}:${x.id}">${catIcon(cat)}<span class="nm">${esc(nameOf(x))}${x.qty>1?`<span class="qty">×${x.qty}</span>`:''}</span></button>
+    <button class="del" data-del="${where}:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`;
+}
+function vList(){
+  let h=demoBar()+hint('list','Tick it when it\'s in your cart','Tap the circle next to an item. Swipe left to see your cart.');
+  h+=`<form class="add" id="addf"><input type="text" id="addin" placeholder="Add an item" autocomplete="off" enterkeyhint="done" aria-label="Add an item"><button class="btn sq" aria-label="Add">${ic('plus')}</button></form>`;
+  const inList=new Set(S.list.map(keyOf));
+  const quick=S.recent.filter(r=>!inList.has(keyOf(r))).slice(0,10);
+  if(quick.length)h+=`<div class="quick" aria-label="Add again">${quick.map(r=>`<button data-quick="${esc(keyOf(r))}">${catIcon(catOf(r.type||guessType(r.name||'')))}${esc(nameOf(r))}</button>`).join('')}</div>`;
+  if(!S.list.length)return h+`<div class="card empty">${art('list')}<b>Your list is empty</b><span class="soft">Type what you need above, or tap Scan.</span></div>`;
+  return h+`<div class="card rows">${S.list.map(x=>rowHtml(x,'list')).join('')}</div>`;
+}
+function vCart(){
+  let h=demoBar();
+  if(!S.cart.length)return h+`<div class="card empty">${art('cart')}<b>Nothing in your cart yet</b><span class="soft">On your list, tap the circle as you pick things up.</span></div>`;
+  h+=hint('cart','Home from the shops?','Tap "Put it all away" and choose fridge, freezer or pantry for each item.');
+  h+=`<div class="card rows">${S.cart.map(x=>rowHtml(x,'cart')).join('')}</div>`;
+  h+=`<button class="btn go wide bigcta" data-putaway>${ic('home')}Put it all away</button>`;
+  return h;
+}
+function levelTxt(h){const f=h.rem/h.total;return h.unit==='%'?`${Math.round(f*100)}% left`:`${Math.round(f*100)}% left · ${fmtAmt(h.rem,h.unit)}`}
+function expChip(h){if(!h.exp)return '';const d=days(h.exp);
+  if(d<0)return `<span class="chip bad">${ic('warn')}Expired</span>`;
+  if(d<=3)return `<span class="chip warn">${ic('clock')}${d===0?'Today':d===1?'Tomorrow':d+' days'}</span>`;
+  return `<span class="chip">${ic('clock')}${new Date(h.exp).toLocaleDateString(undefined,{day:'numeric',month:'short'})}</span>`}
+function vHome(){
+  let h=demoBar()+hint('home','Find anything at home','Pick Fridge, Freezer or Pantry, then a food type. Tap an item to say how much is left.');
+  const soon=S.home.filter(x=>x.exp&&days(x.exp)<=2&&x.rem/x.total>=.2).sort((a,b)=>a.exp-b.exp);
+  if(soon.length)h+=`<button class="banner" data-open="${soon[0].id}">${ic('clock')}<span><b>${esc(nameOf(soon[0]))} ${days(soon[0].exp)<0?'has expired':days(soon[0].exp)===0?'expires today':days(soon[0].exp)===1?'expires tomorrow':'expires in '+days(soon[0].exp)+' days'}</b>${soon.length>1?`and ${soon.length-1} more soon`:'Use it up soon'}</span></button>`;
+  h+=`<div class="places" role="group" aria-label="Where">${PLACES.map(([k,l])=>{const n=S.home.filter(x=>x.place===k).length;return `<button class="tile" data-place="${k}" aria-pressed="${S.place===k}">${art(k)}<span>${l}</span><span class="c">${n} item${n===1?'':'s'}</span></button>`}).join('')}</div>`;
+  const here=S.home.filter(x=>x.place===S.place);
+  const cats=CATS.filter(c=>here.some(x=>x.cat===c[0]));
+  if(S.cat!=='all'&&!cats.some(c=>c[0]===S.cat))S.cat='all';
+  if(cats.length>1)h+=`<div class="cats" role="group" aria-label="Food type"><button data-cat="all" aria-pressed="${S.cat==='all'}">${`<span class="ci" style="background:#ECEEF1">${ic('all')}</span>`}All</button>${cats.map(c=>`<button data-cat="${c[0]}" aria-pressed="${S.cat===c[0]}">${catIcon(c[0])}${c[1]}</button>`).join('')}</div>`;
+  const shown=here.filter(x=>S.cat==='all'||x.cat===S.cat).sort((a,b)=>(a.exp||9e15)-(b.exp||9e15));
+  if(!shown.length)return h+`<div class="card empty">${art(S.place)}<b>Your ${PL[S.place].toLowerCase()} is empty</b><span class="soft">Things you put away will show up here.</span></div>`;
+  h+=`<div class="grid">${shown.map(x=>`<div class="item" data-item="${x.id}"><button data-open="${x.id}" style="text-align:left;display:flex;flex-direction:column" aria-label="${esc(nameOf(x))}, ${esc(levelTxt(x))}"><span class="pic">${vessel(x.shape,x.rem/x.total,fillOf(x))}</span><span class="nm">${esc(nameOf(x))}</span><span class="lvl">${Math.round(x.rem/x.total*100)}% left</span><span class="meter"><i style="width:${Math.round(x.rem/x.total*100)}%"></i></span>${expChip(x)}</button><button class="del" data-del="home:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`).join('')}</div>`;
+  h+=`<form class="add" id="findf" style="margin-top:18px"><input type="search" id="findin" placeholder="Where's my…" aria-label="Find an item at home"><button class="btn sq ghost" aria-label="Find">${ic('search')}</button></form>`;
+  return h;
+}
+function render(){
+  tabs();
+  const keep=[0,1,2].map(i=>$('pager').children[i].scrollTop);
+  $('p-list').innerHTML=vList();$('p-cart').innerHTML=vCart();$('p-home').innerHTML=vHome();
+  [0,1,2].forEach(i=>$('pager').children[i].scrollTop=keep[i]);
   save();
 }
-function open(h,onClose){closeViewer();$('panel').innerHTML=h;$('sheet').hidden=false;$('sheet')._close=onClose||null}
-function close(){closeViewer();$('sheet').hidden=true;const f=$('sheet')._close;$('sheet')._close=null;f&&f()}
+
+/* ================= pager ================= */
+const pager=$('pager');
+function onScroll(){const w=pager.clientWidth||1,f=pager.scrollLeft/w;$('bar').style.transform=`translateX(${f*100}%)`;const p=Math.round(f);if(p!==page){page=p;tabs()}}
+pager.addEventListener('scroll',onScroll,{passive:true});
+function goPage(i,smooth=true){pager.scrollTo({left:i*pager.clientWidth,behavior:smooth&&!reduce?'smooth':'auto'})}
+$('tabs').addEventListener('click',e=>{const b=e.target.closest('[data-p]');if(b)goPage(+b.dataset.p)});
+window.addEventListener('resize',()=>goPage(page,false));
+
+/* ================= sheets & toast ================= */
+let viewer=null,onClose=null,undoFn=null,tt=0;
+function open(h,{full=false,close}={}){closeViewer();const p=$('panel');p.className='panel'+(full?' full':'');p.innerHTML=(full?'':'<div class="grab"></div>')+`<button class="shut" data-close aria-label="Close">${ic('close')}</button>`+h;$('sheet').hidden=false;onClose=close||null;p.scrollTop=0}
+function close(){closeViewer();stopScanner();$('sheet').hidden=true;const f=onClose;onClose=null;f&&f()}
 function closeViewer(){if(viewer){viewer.dispose();viewer=null}}
-function toast(m,u){$('tmsg').textContent=m;undoFn=u||null;$('tundo').hidden=!u;$('toast').hidden=false;clearTimeout(tt);tt=setTimeout(()=>$('toast').hidden=true,u?6000:3200)}
+function toast(m,u){$('tmsg').textContent=m;undoFn=u||null;$('tundo').hidden=!u;$('toast').hidden=false;clearTimeout(tt);tt=setTimeout(()=>$('toast').hidden=true,u?6000:2800)}
+const sheetOpen=()=>!$('sheet').hidden;
 
-/* ================= LIST ================= */
-function vList(){
-  let h='',i=0;
-  const soon=S.home.filter(x=>x.exp&&days(x.exp)<=3&&days(x.exp)>=0&&x.rem/x.total>=.3).sort((a,b)=>a.exp-b.exp)[0];
-  h+=`<div ${rv(i++)}><h1>Groceries</h1><p class="lede">${S.pending.length?`${S.pending.length} to get`:'Nothing pending'}${S.collected.length?` · ${S.collected.length} in the basket`:''}</p></div>`;
-  if(soon)h+=`<div class="note warn glass" ${rv(i++)}><strong>${esc(soon.code?title(P(soon.code)):soon.name)}: ${esc(expTxt(soon.exp).toLowerCase())}</strong>${Math.round(soon.rem/soon.total*100)}% is still left. <button class="link" data-go="recipes">Recipes to use it up</button></div>`;
-  h+=`<div class="seg glass" role="group" aria-label="Lists" ${rv(i++)}><button data-seg="pending" aria-pressed="${seg==='pending'}">Pending · ${S.pending.length}</button><button data-seg="collected" aria-pressed="${seg==='collected'}">Collected · ${S.collected.length}</button></div>`;
-  if(seg==='pending'){
-    h+=`<form class="add" id="addf" ${rv(i++)}><input type="text" id="addin" placeholder="Add an item, e.g. milk" autocomplete="off" aria-label="Item name"><button class="btn">Add</button></form>`;
-    let total=0,unpriced=0;
-    const rows=S.pending.map(x=>{const k=keyOf(x),lp=lastPaid(k),lb=lastBought(k);if(lp)total+=lp.price*x.qty;else unpriced++;
-      return `<div class="row"><button class="check" data-collect="${x.id}" aria-label="Mark ${esc(nameOf(x))} collected"></button><div><div class="nm">${nameHtml(x)}</div>
-      <div class="sub">${lp?`Last paid ${money(lp.price)}${lp.store?' at '+esc(lp.store):''}, ${ago(lp.t)}`:'No price yet'}</div>${S.showAv&&lb&&lb.store&&(!lp||lb.store!==lp.store)?`<div class="sub">Last bought at ${esc(lb.store)}, ${ago(lb.t)}</div>`:''}${!x.code?'<div class="sub">Scan it in the store to get the exact product</div>':''}${S.showAv&&x.code?shopperLine(x.code):''}</div>
-      <div class="ctl"><div class="step"><button data-q="${x.id}" data-d="-1" aria-label="Fewer">−</button><span>${x.qty}</span><button data-q="${x.id}" data-d="1" aria-label="More">+</button></div><button class="x" data-delp="${x.id}" aria-label="Delete ${esc(nameOf(x))}">✕</button></div></div>`}).join('');
-    h+=`<div class="card glass" style="margin-top:12px" ${rv(i++)}>${rows||`<div class="empty"><div class="big">Your list is clear</div>Type what you need above, or scan a barcode.</div>`}
-      ${S.pending.length?`<div class="total"><span class="small">Based on what you last paid${unpriced?` · ${unpriced} item${unpriced>1?'s':''} without a price`:''}</span><b>${unpriced===S.pending.length?'—':money(total)}</b></div>`:''}</div>`;
-  }else{
-    let tot=0,np=0;
-    const rows=S.collected.map(x=>{if(x.price!=null)tot+=x.price*x.qty;else np++;return `<div class="row"><span class="check on" aria-hidden="true">✓</span><div><div class="nm">${nameHtml(x)}</div><div class="sub">${x.store?esc(x.store)+' · ':''}${x.price!=null?money(x.price)+(x.qty>1?' × '+x.qty:''):'No price entered'}</div>
-      <button class="link" style="font-size:14px;margin-top:4px" data-away="${x.id}">Put away at home</button></div>
-      <div class="ctl"><div class="step"><button data-qc="${x.id}" data-d="-1" aria-label="Fewer">−</button><span>${x.qty}</span><button data-qc="${x.id}" data-d="1" aria-label="More">+</button></div><button class="x" data-delc="${x.id}" aria-label="Move back to Pending">✕</button></div></div>`}).join('');
-    h+=`<div class="card glass" ${rv(i++)}>${rows||`<div class="empty"><div class="big">Basket's empty</div>Tick items on Pending as you pick them up.</div>`}
-      ${S.collected.length?`<div class="total"><span class="small">Collected total${np?` · ${np} without a price`:''}</span><b>${money(tot)}</b></div>`:''}</div>`;
-    if(S.collected.length)h+=`<div class="acts2" ${rv(i++)}><button class="btn" data-awayall>Put everything away</button></div><p class="small" ${rv(i++)}>Removing an item here sends it back to Pending. Removing one from Pending deletes it.</p>`;
-  }
-  return h;
+/* ================= list & cart actions ================= */
+function addToList(name,code){
+  const e=code?entry(code):entry(null,name);
+  const same=S.list.find(x=>keyOf(x)===keyOf(e));
+  if(same)same.qty++;else S.list.unshift({id:uid(),...e,qty:1});
+  remember(e);
 }
-function addPending(v){
-  v=v.trim();if(!v)return;
-  const hit=Object.values(S.products).find(p=>title(p).toLowerCase()===v.toLowerCase());
-  const same=S.pending.find(x=>hit?x.code===hit.code:(!x.code&&x.name.toLowerCase()===v.toLowerCase()));
-  if(same)same.qty++;else S.pending.unshift(hit?{id:uid(),code:hit.code,qty:1}:{id:uid(),name:v[0].toUpperCase()+v.slice(1),qty:1});
+function animateOut(id,cls,done){const el=document.querySelector(`[data-row="${id}"],[data-item="${id}"]`);if(!el||reduce)return done();el.classList.add(cls);setTimeout(done,260)}
+function moveToCart(id){const i=S.list.findIndex(x=>x.id===id);if(i<0)return;const x=S.list[i];
+  animateOut(id,'out',()=>{S.list.splice(i,1);S.cart.unshift(x);render();toast(`${nameOf(x)} is in your cart`,()=>{S.cart=S.cart.filter(y=>y!==x);S.list.splice(i,0,x)})})}
+function backToList(id){const i=S.cart.findIndex(x=>x.id===id);if(i<0)return;const x=S.cart[i];
+  animateOut(id,'gone',()=>{S.cart.splice(i,1);S.list.unshift(x);render();toast(`${nameOf(x)} is back on your list`)})}
+function del(where,id){const arr=S[where],i=arr.findIndex(x=>x.id===id);if(i<0)return;const x=arr[i];
+  animateOut(id,'gone',()=>{arr.splice(i,1);render();toast(`Deleted ${nameOf(x)}`,()=>arr.splice(i,0,x))})}
+function qtySheet(where,id){const x=S[where].find(y=>y.id===id);if(!x)return;
+  open(`<h1>${esc(nameOf(x))}</h1><div style="display:flex;align-items:center;justify-content:center;gap:22px;margin:18px 0 22px"><button class="btn ghost sq" data-q="-1" aria-label="Fewer">${ic('minus')}</button><span id="qv" style="font-size:48px;font-weight:700;min-width:60px;text-align:center">${x.qty}</span><button class="btn ghost sq" data-q="1" aria-label="More">${ic('plus')}</button></div>
+   <div class="acts"><button class="btn ghost" data-del="${where}:${x.id}" data-andclose>${ic('trash')}Delete</button><button class="btn" data-close>Done</button></div>`);
+  $('panel').querySelectorAll('[data-q]').forEach(b=>b.onclick=()=>{x.qty=Math.max(1,x.qty+ +b.dataset.q);$('qv').textContent=x.qty;render()});
 }
 
-/* shopper reports (real prices and stock seen by other people) */
-function latestPerStore(list){const m={};list.forEach(r=>{const k=r.store_osm||r.store_name;if(!m[k])m[k]=r});return Object.values(m)}
-function km(r){const p=S.lastPos;if(!p||r.lat==null)return null;const R=6371,x=(r.lat-p.lat)*Math.PI/180,y=(r.lon-p.lon)*Math.PI/180,h=Math.sin(x/2)**2+Math.cos(p.lat*Math.PI/180)*Math.cos(r.lat*Math.PI/180)*Math.sin(y/2)**2;return 2*R*Math.asin(Math.sqrt(h))}
-function getReports(code){const c=repCache[code];if(c&&now()-c.t<5*60e3)return c.list;if(!c||!c.loading){repCache[code]={t:0,list:c?c.list:null,loading:true};cloud.reportsFor(code,S.country).then(l=>{repCache[code]={t:now(),list:l};if(tab==='list')render();if(tab==='scan'&&scanState.code===code){const b=$('repbox');if(b)b.innerHTML=repHtml(code)}}).catch(()=>{repCache[code]={t:now(),list:[]}})}return c?c.list:null}
-function shopperLine(code){if(!cloud.enabled())return '';const l=getReports(code);if(!l||!l.length)return '';const st=latestPerStore(l),cheap=st.filter(r=>r.in_stock&&r.price!=null).sort((a,b)=>a.price-b.price)[0];
-  return cheap?`<div class="sub" style="color:var(--pist)">Lowest seen: ${money(cheap.price)} at ${esc(cheap.store_name)}, ${ago(new Date(cheap.created_at))} · shopper report</div>`:''}
-function repHtml(code){
-  if(!cloud.enabled())return '';
-  const l=getReports(code);
-  if(l===null)return `<div class="card glass"><span class="spin"></span>&nbsp; Checking shopper reports…</div>`;
-  const st=latestPerStore(l).sort((a,b)=>(km(a)??1e9)-(km(b)??1e9));
-  return `<h2>Seen by shoppers</h2><div class="card glass">${st.length?st.slice(0,12).map(r=>{const k=km(r);return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(r.store_name)}</div><div class="sub">${ago(new Date(r.created_at))}${k!=null?' · '+(k<1?Math.round(k*1000)+' m':k.toFixed(1)+' km'):''} · shopper report</div></div>${r.in_stock?(r.price!=null?`<b style="white-space:nowrap">${money(r.price)}</b>`:'<span class="chip good">In stock</span>'):'<span class="chip warn">Out of stock</span>'}</div>`}).join(''):'<p class="muted" style="margin:0">No one has reported this item in the last 30 days. Yours will be the first.</p>'}
-    <div class="acts2" style="margin-top:10px"><button class="btn sm ghost" data-oos>Out of stock here</button></div></div>`;
-}
-/* store picker shared by sheets */
-function storeField(id,val){
-  const names=[...new Set([...(S.stores||[]).map(s=>s.name),...S.purchases.map(p=>p.store).filter(Boolean)])];
-  return `<div class="field">Store<input type="text" id="${id}" list="${id}-dl" value="${esc(val||'')}" placeholder="Any store, big or small" autocomplete="off"><datalist id="${id}-dl">${names.map(n=>`<option value="${esc(n)}">`).join('')}</datalist>
-   <div class="chips" id="${id}-near">${names.slice(0,4).map(n=>`<button type="button" data-setstore="${esc(n)}" data-target="${id}">${esc(n)}</button>`).join('')}<button type="button" data-near="${id}">Find stores near me</button></div></div>`;
-}
-async function findNear(target){
-  const box=$(target+'-near');if(!box)return;box.innerHTML='<span class="small"><span class="spin"></span> Finding every shop near you…</span>';
-  try{const pos=await here();S.lastPos=pos;const list=await nearbyStores(pos);
-    if(!$(target+'-near'))return;
-    box.innerHTML=list.length?list.slice(0,24).map(s=>`<button type="button" data-setstore="${esc(s.name)}" data-osm="${esc(s.id)}" data-lat="${s.lat}" data-lon="${s.lon}" data-target="${target}">${esc(s.name)}<span class="small">&nbsp;· ${s.m<1000?s.m+' m':(s.m/1000).toFixed(1)+' km'}${s.kind?' · '+esc(s.kind):''}</span></button>`).join(''):'<span class="small">No shops found within 3 km on OpenStreetMap. Type the name instead.</span>';
-    box._list=list;
-  }catch(e){box.innerHTML=`<span class="small">${e&&e.code===1?'Location permission was declined.':'Couldn\'t search right now.'} Type the store name instead.</span>`}
-}
-function rememberStore(name,osm,lat,lon){if(!name)return;S.store=name;const ex=S.stores.find(s=>s.name===name);if(ex){if(osm){ex.id=osm;ex.lat=lat;ex.lon=lon}}else S.stores.unshift({name,id:osm||null,lat:lat??null,lon:lon??null});S.stores=S.stores.slice(0,30)}
-const storeInfo=name=>S.stores.find(s=>s.name===name)||{name};
-
-function collectSheet(id){
-  const x=S.pending.find(y=>y.id===id);if(!x)return;const lp=lastPaid(keyOf(x));
-  open(`<h1>Got it</h1><p class="nm">${nameHtml(x)}</p><form id="colf">${storeField('cs',S.store)}
-   <div class="two"><div class="field">Price each<input type="number" id="cp" step="0.01" min="0" inputmode="decimal" placeholder="${lp?'Last '+money(lp.price):'Shelf price'}"></div><div class="field">Quantity<input type="number" id="cq" min="1" value="${x.qty}" inputmode="numeric"></div></div>
-   <p class="small">Leave the price empty if you don't want to record it. Prices are never guessed.</p>
-   <div class="acts2"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn ok">Move to Collected</button></div></form>`);
-  $('colf').onsubmit=e=>{e.preventDefault();const pr=$('cp').value===''?null:+$('cp').value;doCollect(x,$('cs').value.trim()||null,pr,Math.max(1,+$('cq').value||1));close()};
-}
-function doCollect(x,store,price,qty){
-  if(store)rememberStore(store);
-  const pur={id:uid(),code:x.code||null,name:x.code?null:x.name,t:now(),store,price,qty};S.purchases.push(pur);
-  S.pending=S.pending.filter(y=>y.id!==x.id);
-  S.collected.unshift({id:uid(),code:x.code||null,name:x.name||null,qty,store,price,pid:pur.id});
-  if(ME&&x.code&&store){const si=storeInfo(store);cloud.report({code:x.code,store_name:store,store_osm:si.id||null,lat:si.lat??null,lon:si.lon??null,country:S.country,currency:COUNTRIES[S.country][1],price,in_stock:true}).then(ok=>{if(ok)delete repCache[x.code]})}
-  render();toast(`Collected ${qty>1?qty+' × ':''}${x.code?title(P(x.code)):x.name}`);
-}
-const LOCS=['Fridge · top shelf','Fridge · middle shelf','Fridge · door','Fridge · crisper drawer','Freezer','Pantry · top shelf','Kitchen cabinet','Counter'];
-function awaySheet(ids){
-  const items=ids.map(id=>S.collected.find(y=>y.id===id)).filter(Boolean);if(!items.length)return;
-  const x=items[0],p=P(x.code),cold=p&&/refrig|fridge|chill|°c|°f|cold/i.test(p.storage||'');
-  const needSize=!p||!p.size;
-  open(`<h1>Put it away</h1><p class="nm">${nameHtml(x)}${items.length>1?` <span class="small">and ${items.length-1} more</span>`:''}</p><form id="awf">
-   <div class="field">Where are you keeping it?<input type="text" id="al" value="${esc(S.lastLoc&&!cold?S.lastLoc:cold?'Fridge · top shelf':'')}" placeholder="e.g. Fridge · door" required><div class="chips">${[...new Set([...S.locs,...LOCS])].slice(0,12).map(l=>`<button type="button" data-loc="${esc(l)}">${esc(l)}</button>`).join('')}</div></div>
-   ${items.length===1?`<div class="field">Expiry date on the package<input type="date" id="ae"><span class="small" style="font-weight:500">Leave empty if there's no date printed.</span></div>`:''}
-   ${items.length===1&&needSize?`<div class="two"><div class="field">Size of one<input type="number" id="asz" min="0.1" step="any" required inputmode="decimal"></div><div class="field">Unit<select id="au"><option>ml</option><option>g</option><option>pcs</option></select></div></div>`:''}
-   ${p&&p.storage?`<p class="small">Label says: ${esc(p.storage)}</p>`:''}
-   <div class="acts2"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save at home</button></div></form>`);
-  $('awf').onsubmit=e=>{e.preventDefault();const loc=$('al').value.trim();S.lastLoc=loc;if(!S.locs.includes(loc)&&!LOCS.includes(loc))S.locs.unshift(loc);
-    let skipped=0;
-    items.forEach(it=>{const q=P(it.code);let size=q&&q.size,unit=q&&q.unit;
-      if(items.length===1&&$('asz')){size=+$('asz').value;unit=$('au').value;if(q){q.size=size;q.unit=unit}}
-      if(!size){skipped++;return}
-      const exp=items.length===1&&$('ae')&&$('ae').value?new Date($('ae').value+'T12:00').getTime():null;
-      for(let k=0;k<it.qty;k++)S.home.unshift({id:uid(),code:it.code,name:it.code?null:it.name,type:q?q.type:guessType(it.name),shape:q?q.shape:guessShape(guessType(it.name)),total:size,rem:size,unit,loc,exp,added:now(),logs:[]});
-      S.collected=S.collected.filter(y=>y.id!==it.id)});
-    close();render();toast(skipped?`Saved. ${skipped} item${skipped>1?'s need':' needs'} a size, open them one by one.`:`Saved in ${loc}`)};
+/* ================= put away ================= */
+function putAwaySheet(items){
+  if(!items.length)return;
+  const rows=items.map(it=>{const t=typeOf(it),c=it.cat||catOf(t);return {...it,type:t,cat:c,place:placeFor(c,t),exp:''}});
+  open(`<h1>Where does it go?</h1><p class="soft" style="margin:0 2px 14px">We guessed for you. Tap to change.</p><div id="aw">${rows.map((r,i)=>`<div class="away"><div class="top2">${catIcon(r.cat)}<span class="nm">${esc(nameOf(r))}${r.qty>1?`<span class="qty">×${r.qty}</span>`:''}</span></div>
+     <div class="pick" role="group" aria-label="Where to keep ${esc(nameOf(r))}">${PLACES.map(([k,l])=>`<button data-aw="${i}:${k}" aria-pressed="${r.place===k}">${ic(k)}${l}</button>`).join('')}</div>
+     <label class="exp">${ic('clock')}<span>Expiry<br><span class="small">if printed</span></span><input type="date" data-awexp="${i}" aria-label="Expiry date for ${esc(nameOf(r))}"></label></div>`).join('')}</div>
+   <button class="btn go wide" id="awgo">${ic('check')}Put away</button>`);
+  $('panel').querySelectorAll('[data-aw]').forEach(b=>b.onclick=()=>{const [i,k]=b.dataset.aw.split(':');rows[+i].place=k;b.parentElement.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)))});
+  $('panel').querySelectorAll('[data-awexp]').forEach(inp=>inp.onchange=()=>rows[+inp.dataset.awexp].exp=inp.value);
+  $('awgo').onclick=()=>{
+    rows.forEach(r=>{const p=P(r.code),q=Math.max(1,r.qty||1);
+      const sized=p&&p.size&&p.unit,base={code:r.code||null,name:r.code?null:r.name,type:r.type,cat:r.cat,place:r.place,shape:(p&&p.shape)||guessShape(r.type,[],[],0,''),exp:r.exp?new Date(r.exp+'T12:00').getTime():null,added:now(),logs:[],demo:!!r.demo};
+      if(sized)for(let k=0;k<q;k++)S.home.unshift({id:uid(),...base,total:p.size,rem:p.size,unit:p.unit});
+      else S.home.unshift({id:uid(),...base,total:q>1?q:100,rem:q>1?q:100,unit:q>1?'pcs':'%'})
+      if(r.from==='cart')S.cart=S.cart.filter(y=>y.id!==r.id);remember(r)});
+    const first=rows[0].place;S.place=first;S.cat='all';close();render();goPage(2);toast(rows.length===1?`Put away in the ${PL[first].toLowerCase()}`:`${rows.length} items put away`)};
 }
 
-/* ================= AT HOME ================= */
-function rateOf(it){const used=it.logs.reduce((s,l)=>s+l.a,0);if(!used||it.logs.length<1)return 0;const span=Math.max(1,(now()-Math.min(it.added,...it.logs.map(l=>l.t)))/DAY);return used/span}
-function runsOut(it){const r=rateOf(it);return r&&it.logs.length>=2?Math.max(0,Math.round(it.rem/r)):null}
-const label=it=>it.code?title(P(it.code)):it.name;
-function vHome(){
-  let h='',i=0;const q=(S.q||'').toLowerCase().trim();
-  h+=`<div ${rv(i++)}><h1>At home</h1><p class="lede">${S.home.length?`${S.home.length} item${S.home.length>1?'s':''} tracked`:'Nothing tracked yet'}</p></div>`;
-  h+=`<input type="search" id="q" placeholder="Where's my…" aria-label="Find an item at home" value="${esc(S.q||'')}" ${rv(i++)}>`;
-  const list=S.home.filter(x=>!q||(label(x)+' '+x.loc+' '+x.type).toLowerCase().includes(q)).sort((a,b)=>(a.exp||9e15)-(b.exp||9e15));
-  if(q&&list.length)h+=`<div class="note good" style="margin-top:12px" ${rv(i++)}><strong>${esc(label(list[0]))}</strong>is in ${esc(list[0].loc)}.</div>`;
-  h+=`<div style="margin-top:12px">`;
-  if(!list.length)h+=`<div class="card glass empty" ${rv(i++)}><div class="big">${q?'Not found':'Nothing here yet'}</div>${q?`No item matches “${esc(q)}”.`:'Collect items at the store, then tap “Put away at home”.'}</div>`;
-  h+=list.map(x=>{const f=x.rem/x.total,used=Math.round((1-f)*100),ro=runsOut(x),ll=x.logs[x.logs.length-1],d=x.exp?days(x.exp):null;
-    return `<button class="item glass" data-det="${x.id}" ${rv(i++)}>${vessel(x.shape,f,colorOf(x.type))}<div><div class="nm">${esc(label(x))}</div>
-      <div class="sub">${used}% used · ${fmtAmt(x.rem,x.unit)} left · ${esc(x.loc)}</div><div class="meter"><i style="width:${Math.round(f*100)}%"></i></div>
-      <div class="meta"><span class="chip ${d!=null&&d<=3?'warn':''}">${esc(expTxt(x.exp))}</span>${ro!=null?`<span class="chip">≈${ro} day${ro===1?'':'s'} left (estimate)</span>`:''}${ll?`<span class="chip good">Used ${fmtAmt(ll.a,x.unit)} ${ago(ll.t)}</span>`:''}</div></div></button>`}).join('');
-  h+='</div>';
-  const acts=S.home.flatMap(x=>x.logs.map(l=>({x,l}))).sort((a,b)=>b.l.t-a.l.t).slice(0,8);
-  if(acts.length&&!q)h+=`<h2 ${rv(i++)}>Recent use</h2><div class="card glass" ${rv(i++)}>${acts.map(({x,l})=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(label(x))}</div><div class="sub">${new Date(l.t).toLocaleString(undefined,{weekday:'short',hour:'numeric',minute:'2-digit'})}${l.note?' · '+esc(l.note):''}</div></div><span class="chip">−${fmtAmt(l.a,x.unit)}</span></div>`).join('')}</div>`;
-  return h;
-}
-
+/* ================= item detail ================= */
+const LEVELS=[[1,'Full'],[.75,'¾'],[.5,'Half'],[.25,'¼'],[0,'Empty']];
+function levelArt(f){return `<svg viewBox="0 0 24 34" aria-hidden="true"><rect x="4" y="2" width="16" height="30" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><rect x="6" y="${4+26*(1-f)}" width="12" height="${26*f}" rx="1.5" fill="currentColor"/></svg>`}
 async function detail(id){
-  const it=S.home.find(x=>x.id===id);if(!it)return;const p=P(it.code),f=it.rem/it.total;
-  open(`<div class="viewer" id="vw"><div class="hud"><div class="big" id="vpct"></div><div class="muted" id="vleft"></div></div><div class="hint">Drag to turn · pinch to zoom</div></div><div id="dbody"></div>`);
+  const it=S.home.find(x=>x.id===id);if(!it)return;
+  open(`<div class="viewer" id="vw"><span class="hint2">Drag to turn · pinch to zoom</span></div><div id="dbody"></div>`);
   drawDetail(it);
-  try{const mv=(await import('./viewer.js')).mountViewer;if($('vw')&&!$('sheet').hidden){closeViewer();viewer=mountViewer_(mv,it,p)}}catch(e){$('vw')&&($('vw').insertAdjacentHTML('beforeend',`<div style="position:absolute;inset:60px 0 30px;display:grid;place-items:center">${vessel(it.shape,f,colorOf(it.type))}</div>`))}
+  try{const mv=(await import('./viewer.js')).mountViewer;const p=P(it.code);if($('vw')&&sheetOpen()){closeViewer();viewer=mv($('vw'),{shape:it.shape,level:it.rem/it.total,color:fillOf(it),brand:p&&p.brand,name:nameOf(it),label:p&&p.label,image:p&&p.image})}}
+  catch(e){const v=$('vw');if(v)v.insertAdjacentHTML('beforeend',`<div style="position:absolute;inset:16px;display:grid;place-items:center">${vessel(it.shape,it.rem/it.total,fillOf(it))}</div>`)}
 }
 function drawDetail(it){
-  const p=P(it.code);
-  $('vpct').textContent=Math.round((1-it.rem/it.total)*100)+'% used';$('vleft').textContent=`${fmtAmt(it.rem,it.unit)} of ${fmtAmt(it.total,it.unit)} left`;
-  const pre=it.unit==='ml'?[[30,'Splash, 30 ml'],[250,'A glass, 250 ml'],[500,'500 ml']]:it.unit==='pcs'?[[1,'1'],[2,'2'],[3,'3']]:[[50,'50 g'],[100,'100 g'],[250,'250 g']];
-  const step=it.unit==='pcs'?1:Math.max(1,Math.round(it.total/200)),start=Math.min(pre[1][0],it.rem);
-  $('dbody').innerHTML=`<div class="pname">${esc(label(it))}</div><div class="sub">${p&&p.label?esc(p.label)+' · ':''}${esc(it.loc)} · ${esc(expTxt(it.exp))}</div>
-   <h2>Log use</h2><div class="card glass">${it.rem>0?`<div class="big" id="la" style="font-size:36px">${fmtAmt(start,it.unit)}</div>
-     <input type="range" id="lr" min="${step}" max="${it.rem}" step="${step}" value="${start}" aria-label="Amount used">
-     <div class="chips" style="margin:4px 0 12px">${pre.filter(([v])=>v<=it.rem).map(([v,l])=>`<button type="button" data-amt="${v}">${l}</button>`).join('')}<button type="button" data-amt="${it.rem}">All of it</button></div>
-     <button class="btn" style="width:100%" id="lsave">Log it</button>`:'<p class="muted">This one is finished.</p>'}</div>
-   ${it.logs.length?`<h2>History</h2><div class="card glass">${[...it.logs].reverse().slice(0,12).map((l,ix)=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto auto"><span>${new Date(l.t).toLocaleString(undefined,{weekday:'short',day:'numeric',month:'short',hour:'numeric',minute:'2-digit'})}${l.note?`<span class="src">${esc(l.note)}</span>`:''}</span><span class="chip">−${fmtAmt(l.a,it.unit)}</span>${ix===0?`<button class="x" data-unlog="${it.id}" aria-label="Undo last use">↶</button>`:'<span></span>'}</div>`).join('')}</div>`:''}
-   ${infoTable(it.code,it)}
-   <h2>Edit</h2><form id="edf" class="card glass"><div class="field">Where it's kept<input type="text" id="el" value="${esc(it.loc)}"></div>
-   <div class="two"><div class="field">Expiry date<input type="date" id="ee" value="${it.exp?dkey(it.exp):''}"></div><div class="field">Container<select id="es">${SHAPES.map(s=>`<option ${s===it.shape?'selected':''}>${s}</option>`).join('')}</select></div></div>
-   <div class="acts2"><button class="btn ghost" type="button" data-finish="${it.id}">It's finished</button><button class="btn">Save changes</button></div></form>`;
-  $('edf').onsubmit=e=>{e.preventDefault();it.loc=$('el').value.trim()||it.loc;it.exp=$('ee').value?new Date($('ee').value+'T12:00').getTime():null;const sh=$('es').value!==it.shape;it.shape=$('es').value;if(it.code&&P(it.code))P(it.code).shape=it.shape;save();render();if(sh)detail(it.id);else{drawDetail(it);toast('Saved')}};
-  const lr=$('lr');if(lr){const sync=()=>$('la').textContent=fmtAmt(+lr.value,it.unit);lr.oninput=sync;
-    $('dbody').querySelectorAll('[data-amt]').forEach(b=>b.onclick=()=>{lr.value=b.dataset.amt;sync()});
-    $('lsave').onclick=()=>{use(it,+lr.value);render();if(it.rem>0)refreshDetail(it)}}
+  const f=it.rem/it.total,near=LEVELS.reduce((a,b)=>Math.abs(b[0]-f)<Math.abs(a[0]-f)?b:a)[0],p=P(it.code);
+  $('dbody').innerHTML=`<h1 style="margin-top:12px">${esc(nameOf(it))}</h1><p class="soft" style="margin:-6px 2px 14px;font-size:20px"><b style="color:var(--ink)">${Math.round(f*100)}% left</b>${it.unit!=='%'?' · '+fmtAmt(it.rem,it.unit):''}</p>
+   <div class="field">How much is left?<div class="left" role="group">${LEVELS.map(([v,l])=>`<button data-lvl="${v}" aria-pressed="${v===near}">${levelArt(v)}${l}</button>`).join('')}</div></div>
+   <div class="field">Where is it?<div class="pick" role="group">${PLACES.map(([k,l])=>`<button data-mv="${k}" aria-pressed="${it.place===k}">${ic(k)}${l}</button>`).join('')}</div></div>
+   <label class="field">Expiry date<input type="date" id="dexp" value="${it.exp?dkey(it.exp):''}"></label>
+   <details><summary>Food type: ${esc(CAT[it.cat].name)}</summary><div class="cats" style="flex-wrap:wrap;margin:0;padding:0">${CATS.map(c=>`<button data-setcat="${c[0]}" aria-pressed="${it.cat===c[0]}">${catIcon(c[0])}${c[1]}</button>`).join('')}</div></details>
+   ${it.logs.length?`<details><summary>Usage history</summary><table>${[...it.logs].reverse().slice(0,10).map(l=>`<tr><td>${new Date(l.t).toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'})}</td><td>Used ${it.unit==='%'?Math.round(l.a)+'%':fmtAmt(l.a,it.unit)}</td></tr>`).join('')}</table></details>`:''}
+   ${p?`<details><summary>About this product</summary><table>${[['Brand',p.brand],['Size',p.label],['Barcode',p.code],['Storage (label)',p.storage],['Allergens',(p.allergens||[]).join(', ')]].filter(r=>r[1]).map(r=>`<tr><td>${r[0]}</td><td>${esc(r[1])}</td></tr>`).join('')}</table><p class="small">From the package label, via Open Food Facts.</p></details>`:''}
+   <div class="acts" style="margin-top:16px"><button class="btn ghost" data-del="home:${it.id}" data-andclose>${ic('trash')}Delete</button><button class="btn" data-close>Done</button></div>`;
+  $('dexp').onchange=e=>{it.exp=e.target.value?new Date(e.target.value+'T12:00').getTime():null;render();toast('Expiry date saved')};
 }
-function refreshDetail(it){if($('dbody')){drawDetail(it);viewer&&viewer.setLevel(it.rem/it.total)}}
-function mountViewer_(mv,it,p){return mv($('vw'),{shape:it.shape,level:it.rem/it.total,color:colorOf(it.type),brand:p&&p.brand,name:p?p.name:it.name,label:p&&p.label,image:p&&p.image})}
-function use(it,a,note){a=Math.min(a,it.rem);if(a<=0)return;it.rem=Math.round((it.rem-a)*100)/100;it.logs.push({t:now(),a,note:note||null});save();if(it.rem<=0)finished(it);else toast(`Logged ${fmtAmt(a,it.unit)} · ${fmtAmt(it.rem,it.unit)} left`)}
+function setLevel(it,v){
+  const target=Math.round(it.total*v*100)/100,used=it.rem-target;
+  if(used>0)it.logs.push({t:now(),a:used});
+  it.rem=target;if(viewer)viewer.setLevel(v);
+  if(it.rem<=0){render();close();finished(it);return}
+  drawDetail(it);render();
+}
 function finished(it){
-  S.home=S.home.filter(x=>x.id!==it.id);save();
-  const name=label(it),addBack=()=>{if(!S.pending.some(x=>keyOf(x)===keyOf(it)))S.pending.unshift(it.code?{id:uid(),code:it.code,qty:1}:{id:uid(),name:it.name,qty:1})};
-  if(S.auto===true){addBack();render();toast(name+' finished · added to Pending');return}
-  setTimeout(()=>{open(`<h1>${esc(name)} is finished</h1><p class="lede">Add it back to your Pending list?</p><div class="acts2"><button class="btn ghost" data-close>Not now</button><button class="btn ok" id="fy">Add to Pending</button></div><p style="margin-top:16px"><button class="link" id="fa">Always add finished items automatically</button></p>`);
-    $('fy').onclick=()=>{addBack();close();render();toast('Added to Pending')};
-    $('fa').onclick=()=>{S.auto=true;addBack();close();render();toast('Finished items will be added automatically')}},60);
+  S.home=S.home.filter(x=>x.id!==it.id);
+  const back=()=>{if(!S.list.some(x=>keyOf(x)===keyOf(it)))S.list.unshift({id:uid(),code:it.code,name:it.name,type:it.type,cat:it.cat,qty:1})};
+  if(S.auto===true){back();render();toast(`${nameOf(it)} is finished, added to your list`);return}
+  render();
+  open(`<div style="text-align:center;padding-top:8px">${catIcon(it.cat,72)}</div><h1 style="text-align:center">${esc(nameOf(it))} is finished</h1><p class="soft" style="text-align:center;margin-top:-4px">Add it to your list?</p>
+   <div class="acts"><button class="btn ghost" data-close>No</button><button class="btn go" id="fy">${ic('plus')}Add to list</button></div>
+   <button class="btn ghost wide" id="fa" style="margin-top:10px;font-size:16px">Always add finished items</button>`);
+  $('fy').onclick=()=>{back();close();render();toast('Added to your list')};
+  $('fa').onclick=()=>{S.auto=true;back();close();render();toast('Finished items will go on your list')};
 }
 
-function infoTable(code,it){
-  const p=P(code),L=(k,v,s)=>`<tr><td>${k}</td><td>${v}${s?`<span class="src">${s}</span>`:''}</td></tr>`;
-  const src=p?(p.src==='Open Food Facts'?'Package label, via Open Food Facts':'Added by you'):'';
-  let r='';
-  if(p){r+=L('Product',esc(title(p))+(p.label?' · '+esc(p.label):''),src)+L('Barcode',esc(p.code),'Package');
-    r+=L('Recommended storage',p.storage?esc(p.storage):`No official info on file <button class="link" data-addstorage="${esc(p.code)}">Add from label</button>`,p.storage?(p.storageSrc||src):'');
-    if(p.nutriscore)r+=L('Nutri-Score',`<span class="ns" style="background:${{A:'#1e8f4e',B:'#60ac0e',C:'#c9a40a',D:'#e07b16',E:'#d6331f'}[p.nutriscore]}">${p.nutriscore}</span>`,src);
-    r+=L('Allergens',p.allergens&&p.allergens.length?esc(p.allergens.join(', ')):'None listed',src);
-    if(p.traces&&p.traces.length)r+=L('May contain',esc(p.traces.join(', ')),src);
-    if(p.nutrition&&p.nutrition.length)r+=L('Per 100 g / 100 ml',p.nutrition.map(([a,b])=>`${esc(a)}: ${esc(b)}`).join('<br>'),src);
-    if(p.ingredients)r+=L('Ingredients',`<details><summary>Show</summary>${esc(p.ingredients)}</details>`,src);
-    if(p.categories&&p.categories.length)r+=L('Category',esc(p.categories.join(' · ')),src);}
-  if(it){const ro=runsOut(it);r+=L('Where you kept it',esc(it.loc),'You')+L('Expiry date',it.exp?new Date(it.exp).toLocaleDateString(undefined,{day:'numeric',month:'long',year:'numeric'}):'Not entered','From your package')+L('Put away',new Date(it.added).toLocaleDateString(undefined,{day:'numeric',month:'short'}),'You')+L('Runs out',ro!=null?`In about ${ro} days at your pace`:'Log use twice to see a forecast',ro!=null?'Estimate from your usage':'')}
-  const k=code||(it&&keyOf(it));const lp=k&&lastPaid(k);if(lp)r+=L('Last bought',`${money(lp.price)}${lp.store?' at '+esc(lp.store):''}, ${dstr(lp.t)}`,'Your receipts');
-  return r?`<h2>Everything about it</h2><div class="card glass"><table>${r}</table></div>`:'';
+/* ================= scanner ================= */
+const SC={tray:[],stop:null,from:0,single:null};
+function stopScanner(){if(SC.stop){try{SC.stop()}catch(e){}SC.stop=null}}
+function scanSheet(){
+  SC.tray=[];SC.single=null;SC.from=page;
+  open(`<h1>Scan</h1><div class="mode" role="group" aria-label="Scan mode"><button data-mode="multi" aria-pressed="${S.scanMode!=='one'}">Scan many</button><button data-mode="one" aria-pressed="${S.scanMode==='one'}">One at a time</button></div>
+   <div class="scanv" id="scanv"><video id="vid" playsinline muted></video><div class="idle" id="idle"><span class="spin"></span>Opening camera…</div></div>
+   <div class="acts" style="margin-top:8px"><button class="btn ghost" id="sphoto">${ic('photo')}Photo</button><button class="btn ghost" id="stype">${ic('keys')}Type number</button></div>
+   <div id="sres"></div>`,{full:true});
+  $('sphoto').onclick=()=>$('file').click();
+  $('stype').onclick=()=>{const r=$('sres');if($('typef'))return;r.insertAdjacentHTML('afterbegin',`<form class="add" id="typef" style="margin-top:12px"><input type="text" id="typein" inputmode="numeric" placeholder="Barcode number" aria-label="Barcode number"><button class="btn sq">${ic('check')}</button></form>`);$('typein').focus();
+    $('typef').onsubmit=e=>{e.preventDefault();const v=$('typein').value.replace(/\D/g,'');if(v){gotCode(v);$('typein').value=''}}};
+  drawTray();startCam();
 }
+async function startCam(){
+  const v=$('vid'),idle=$('idle');if(!v)return;stopScanner();
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){idle.innerHTML='Camera not available here. Use Photo or Type number.';return}
+  try{SC.stop=await startScan(v,c=>gotCode(c),{multi:S.scanMode!=='one'});idle.style.display='none';if(!$('scanv').querySelector('.frame'))$('scanv').insertAdjacentHTML('beforeend','<div class="frame"></div>')}
+  catch(e){idle.style.display='';idle.innerHTML=e&&e.name==='NotAllowedError'?'Camera permission is off. Allow it in your browser settings, or use Photo.':'Couldn\'t open the camera. Use Photo or Type number.'}
+}
+async function ensureProduct(code){
+  if(P(code))return P(code);
+  try{let p=await lookupProduct(code);if(!p)p=await cloud.sharedProduct(code).catch(()=>null);if(p){S.products[code]=enrich(p);save();return p}return null}
+  catch(e){const sp=await cloud.sharedProduct(code).catch(()=>null);if(sp){S.products[code]=enrich(sp);save();return sp}throw e}
+}
+function gotCode(code){
+  if(navigator.vibrate)navigator.vibrate(40);
+  const sv=$('scanv');if(sv){sv.classList.remove('flash');void sv.offsetWidth;sv.classList.add('flash')}
+  let t=SC.tray.find(x=>x.code===code);
+  if(t)t.qty++;else{t={code,qty:1,st:P(code)?'ok':'loading'};SC.tray.unshift(t)}
+  if(S.scanMode==='one'){stopScanner();SC.single=t}
+  drawTray();
+  if(t.st==='loading')ensureProduct(code).then(p=>{t.st=p?'ok':'unknown';drawTray()}).catch(()=>{t.st='unknown';drawTray()});
+}
+function trayName(t){const p=P(t.code);return p?title(p):t.name||null}
+function drawTray(){
+  const r=$('sres');if(!r)return;const typeForm=$('typef')?$('typef').outerHTML:'';
+  const items=S.scanMode==='one'&&SC.single?[SC.single]:SC.tray;
+  if(!items.length){r.innerHTML=typeForm+`<p class="soft" style="text-align:center;margin-top:18px">${S.scanMode==='one'?'Point at a barcode.':'Scan as many items as you like. They collect here.'}</p>`;bindType();return}
+  const order=[[0,'list','Add to list'],[1,'cart','Add to cart'],[2,'home','Put away']];
+  order.sort((a,b)=>(a[0]===SC.from?-1:0)-(b[0]===SC.from?-1:0));
+  r.innerHTML=typeForm+`<h2>${S.scanMode==='one'?'Scanned':`Scanned · ${items.reduce((s,t)=>s+t.qty,0)}`}</h2><div class="card rows tray">${items.map((t,i)=>{const n=trayName(t),c=n?(P(t.code)?enrich(P(t.code)).cat:catOf(guessType(n))):'other';
+      return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div class="tap">${catIcon(c)}<span class="nm">${t.st==='loading'?'<span class="spin"></span> Looking up…':n?esc(n):'Unknown item'}${t.qty>1?`<span class="qty">×${t.qty}</span>`:''}${t.st==='unknown'&&!n?`<br><span class="small">${esc(t.code)}</span>`:''}</span></div>
+      <span style="display:flex;gap:4px">${t.st==='unknown'&&!n?`<button class="btn ghost" style="min-height:48px;font-size:16px;padding:0 12px" data-nameit="${i}">Name it</button>`:''}<button class="del" data-untray="${i}" aria-label="Remove">${ic('trash')}</button></span></div>`}).join('')}</div>
+    <div style="display:grid;gap:10px;margin-top:14px">${order.map(([p,k,l],j)=>`<button class="btn ${j===0?(k==='home'?'go':''):'ghost'} wide" data-send="${k}">${ic(k)}${l}</button>`).join('')}</div>`;
+  bindType();
+}
+function bindType(){const f=$('typef');if(f)f.onsubmit=e=>{e.preventDefault();const v=$('typein').value.replace(/\D/g,'');if(v){gotCode(v);const i=$('typein');if(i)i.value=''}}}
+function sendTray(where){
+  const items=(S.scanMode==='one'&&SC.single?[SC.single]:SC.tray).filter(t=>t.st!=='loading');
+  if(!items.length)return;
+  const ents=items.map(t=>({...entry(P(t.code)?t.code:null,trayName(t)||'Item'),code:P(t.code)?t.code:null,qty:t.qty}));
+  if(where==='home'){const rows=ents.map(e=>({...e,id:uid()}));stopScanner();putAwaySheet(rows);return}
+  ents.forEach(e=>{const arr=where==='list'?S.list:S.cart;const same=arr.find(x=>keyOf(x)===keyOf(e));if(same)same.qty+=e.qty;else arr.unshift({id:uid(),...e});remember(e);if(where==='cart'){const i=S.list.findIndex(x=>keyOf(x)===keyOf(e)||(!x.code&&e.type&&String(x.name||'').toLowerCase().includes(e.type)));if(i>=0)S.list.splice(i,1)}});
+  render();toast(`${ents.length} item${ents.length>1?'s':''} added to your ${where==='list'?'list':'cart'}`);
+  if(S.scanMode==='one'){SC.tray=SC.tray.filter(t=>t!==SC.single);SC.single=null;drawTray();startCam()}else{close();goPage(where==='list'?0:1)}
+}
+function nameIt(i){const t=(S.scanMode==='one'&&SC.single?[SC.single]:SC.tray)[i];if(!t)return;
+  const r=$('sres');r.insertAdjacentHTML('afterbegin',`<form class="add" id="nmf" style="margin-top:12px"><input type="text" id="nmin" placeholder="What is it? e.g. Basmati rice" aria-label="Product name"><button class="btn sq">${ic('check')}</button></form>`);$('nmin').focus();
+  $('nmf').onsubmit=e=>{e.preventDefault();const v=$('nmin').value.trim();if(!v)return;const type=guessType(v);
+    S.products[t.code]=enrich({code:t.code,name:v,brand:'',label:'',size:null,unit:null,image:null,type,shape:guessShape(type,[],[],0,''),storage:null,allergens:[],src:'You'});t.st='ok';save();
+    if(ME)cloud.shareProduct(t.code,{...S.products[t.code],src:'Shared by a shopper'});$('nmf').remove();drawTray()}}
 
-/* ================= SCAN ================= */
-function vScan(){
-  let h='',i=0;
-  h+=`<div ${rv(i++)}><h1>Scan</h1><p class="lede">Point the camera at a barcode.</p></div>`;
-  h+=`<div class="scan glass" id="scanbox" ${rv(i++)}><video id="vid" playsinline muted></video><div class="idle" id="idle"><svg width="74" height="50" viewBox="0 0 84 56" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 16V4h12M68 4h12v12M80 40v12H68M16 52H4V40"/><path d="M22 14v28M28 14v28M33 14v28M40 14v28M45 14v28M52 14v28M58 14v28" stroke-width="2.4"/></svg>
-     <button class="btn" id="camgo">Start camera</button><button class="link" id="photo">Or use a photo</button></div></div>`;
-  h+=`<form class="add" id="bcf" style="margin-top:12px" ${rv(i++)}><input type="text" id="bcin" inputmode="numeric" placeholder="Type a barcode number" aria-label="Barcode number"><button class="btn ghost">Look up</button></form>`;
-  h+=`<div id="res">${resultHtml()}</div>`;
-  return h;
+/* ================= first run & demo ================= */
+const SLIDES=[['list','Your list','Write what you need. Tick it off as it goes in your cart.'],['cart','Your cart','See what you\'ve already picked up, so nothing gets bought twice.'],['home','At home','Know what\'s in the fridge, freezer and pantry, how much is left and when it expires.']];
+function welcome(i=0){
+  if(i<SLIDES.length){const [a,t,x]=SLIDES[i];
+    open(`<div class="slides">${art(a)}<h1>${t}</h1><p class="soft" style="font-size:20px;margin:0 8px">${x}</p><div class="dots">${SLIDES.concat([0]).map((_,j)=>`<i class="${j===i?'on':''}"></i>`).join('')}</div>
+      <div class="acts"><button class="btn ghost" id="wskip">Skip</button><button class="btn" id="wnext">Next</button></div></div>`,{full:true,close:()=>{S.onboarded=true;save()}});
+    $('wnext').onclick=()=>welcome(i+1);$('wskip').onclick=()=>welcome(SLIDES.length);return}
+  open(`<div class="slides"><svg class="art" viewBox="0 0 150 120" aria-hidden="true"><g transform="translate(-28 12) scale(.8)">${art('fridge').replace(/<svg[^>]*>|<\/svg>/g,'')}</g><g transform="translate(55 12) scale(.8)">${art('pantry').replace(/<svg[^>]*>|<\/svg>/g,'')}</g></svg><h1>Want a quick look?</h1><p class="soft" style="font-size:20px;margin:0 8px">We can fill the app with sample groceries so you can try it. Clear them any time.</p>
+    <div style="display:grid;gap:10px;margin-top:20px"><button class="btn go wide" id="wdemo">Show me with sample items</button><button class="btn ghost wide" id="wempty">Start with an empty list</button></div></div>`,{full:true,close:()=>{S.onboarded=true;save()}});
+  $('wdemo').onclick=()=>{loadDemo();S.onboarded=true;S.hints={};close();render();goPage(0,false)};
+  $('wempty').onclick=()=>{S.onboarded=true;close();render();goPage(0,false);setTimeout(()=>$('addin')&&$('addin').focus(),300)};
 }
-function resultHtml(){
-  const s=scanState;if(!s.code)return '';
-  if(s.loading)return `<div class="card glass" style="margin-top:14px"><span class="spin"></span>&nbsp; Looking up ${esc(s.code)}…</div>`;
-  const p=P(s.code);
-  if(!p)return `<div class="card glass" style="margin-top:14px"><h2 style="margin-top:0">${s.err?'Can\'t reach the product database':'Not in the database yet'}</h2><p class="muted">${s.err?'Check your connection and try again, or add it yourself.':'Barcode '+esc(s.code)+' isn\'t on Open Food Facts. Add it once and it\'s saved.'}</p>
-    ${s.err?`<button class="btn ghost" data-retry style="margin-bottom:12px">Try again</button>`:''}
-    <form id="newp"><div class="two"><div class="field">Brand<input type="text" id="np-b" required></div><div class="field">Product<input type="text" id="np-n" required></div></div>
-    <div class="two"><div class="field">Size<input type="number" id="np-s" min="0.1" step="any" required inputmode="decimal"></div><div class="field">Unit<select id="np-u"><option>ml</option><option>g</option><option>pcs</option></select></div></div>
-    <div class="field">Storage, as printed on the label<input type="text" id="np-st" placeholder="e.g. Keep refrigerated"></div><button class="btn" style="width:100%">Save product</button></form></div>`;
-  return `<div class="card glass" style="margin-top:14px"><div class="prod"><div class="ph">${p.image?`<img src="${esc(p.image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:vessel(p.shape,1,colorOf(p.type))}</div><div><div class="pname">${esc(title(p))}</div><div class="sub">${esc(p.label||'Size unknown')} · ${esc(p.code)}</div></div></div>
-    <div style="margin-top:14px">${storeField('ss',S.store)}<div class="field">Price on the shelf<input type="number" id="shelf" step="0.01" min="0" inputmode="decimal" value="${esc(s.shelf)}" placeholder="Optional, to compare with what you paid"></div></div></div>
-    <div id="insbox">${insHtml()}</div><div id="repbox">${repHtml(s.code)}</div>
-    ${infoTable(s.code,null)}`;
+function loadDemo(){
+  const d=(n,type,place,shape,total,unit,left,exp,used)=>({id:uid(),code:null,name:n,type,cat:catOf(type),place,shape,total,rem:Math.round(total*left),unit,exp:exp==null?null:now()+exp*DAY,added:now()-6*DAY,logs:used?[{t:now()-3*DAY,a:total*used/2},{t:now()-DAY,a:total*used/2}]:[],demo:true});
+  S.home=[d('Milk','milk','fridge','carton',1000,'ml',.7,4,.3),d('Eggs','egg','fridge','box',12,'pcs',7/12,16,5/12),d('Greek yogurt','yogurt','fridge','tub',500,'g',.6,1,.2),d('Baby spinach','spinach','fridge','bag',100,'%',.6,2,.4),d('Cheddar','cheddar','fridge','box',100,'%',.5,20,0),
+    d('Chicken breasts','chicken','freezer','bag',100,'%',1,60,0),d('Frozen peas','frozen','freezer','bag',100,'%',.5,120,.5),d('Vanilla ice cream','ice cream','freezer','tub',100,'%',.3,90,.7),
+    d('Penne pasta','penne','pantry','box',500,'g',.8,300,.2),d('Basmati rice','rice','pantry','bag',100,'%',.4,200,.6),d('Olive oil','olive oil','pantry','bottle',500,'ml',.55,240,.45),d('Chopped tomatoes','tomato','pantry','can',100,'%',1,400,0),d('Sourdough bread','bread','pantry','bag',100,'%',.3,1,.7),d('Crisps','chips','pantry','bag',100,'%',.2,30,.8)]
+    .map(h=>{if(h.name==='Chopped tomatoes'){h.cat='jars'}return h}).concat(S.home.filter(h=>!h.demo));
+  const l=(n,q=1)=>({id:uid(),...entry(null,n),qty:q,demo:true});
+  S.list=[l('Bananas',6),l('Butter'),l('Coffee'),l('Tomatoes',4),l('Orange juice')].concat(S.list.filter(x=>!x.demo));
+  S.cart=[l('Bread'),l('Cheddar cheese')].concat(S.cart.filter(x=>!x.demo));
+  ['Milk','Eggs','Bread','Bananas','Pasta','Rice','Coffee','Butter'].forEach(n=>remember(entry(null,n)));
+  S.place='fridge';S.cat='all';
 }
-function insHtml(){
-  const s=scanState,shelf=parseFloat(s.shelf),ins=insights(s.code,shelf>0?shelf:null,($('ss')&&$('ss').value.trim())||S.store),dup=ins.some(n=>n.dup),stock=ins.find(n=>n.stock>1);
-  return `${ins.map(n=>`<div class="note ${n.c||'glass'}"><strong>${n.h}</strong>${n.t}</div>`).join('')}
-    <div class="acts2">${dup?`<button class="btn ghost" data-skip>Skip it</button><button class="btn" data-buy="1">Buy anyway</button>`:`<button class="btn ghost" data-topend>Add to Pending</button><button class="btn" data-buy="1">Collect now</button>`}</div>
-    ${stock?`<div class="acts2"><button class="btn ok" data-buy="${stock.stock}">Collect ${stock.stock}</button></div>`:''}`;
-}
-function drawRes(){const r=$('res');if(r)r.innerHTML=resultHtml()}
-async function lookup(code){
-  code=String(code).trim().replace(/\s/g,'');if(!code)return;
-  if(stopCam){stopCam();stopCam=null}
-  Object.assign(scanState,{code,loading:!P(code),err:null,shelf:''});
-  if(tab!=='scan'){tab='scan';history.replaceState(null,'','#scan');render(true)}else drawRes();
-  if(navigator.vibrate)navigator.vibrate(30);
-  if(!P(code)){try{let p=await lookupProduct(code);if(!p)p=await cloud.sharedProduct(code).catch(()=>null);if(p)S.products[code]=p}catch(e){const sp=await cloud.sharedProduct(code).catch(()=>null);if(sp)S.products[code]=sp;else scanState.err=true}scanState.loading=false;save();drawRes()}
-  const r=$('res');r&&r.scrollIntoView({behavior:'smooth',block:'start'});
-}
-async function camera(){
-  const v=$('vid'),idle=$('idle');if(!v)return;
-  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){idle.insertAdjacentHTML('beforeend','<p class="small">This browser can\'t open the camera here. Use a photo instead.</p>');return}
-  try{idle.style.display='none';$('scanbox').insertAdjacentHTML('beforeend','<div class="frame"></div><div class="laser"></div>');
-    stopCam=await startScan(v,c=>{stopCam=null;lookup(c)});
-  }catch(e){idle.style.display='';$('scanbox').querySelectorAll('.frame,.laser').forEach(n=>n.remove());idle.insertAdjacentHTML('beforeend',`<p class="small">${e&&e.name==='NotAllowedError'?'Camera permission was declined. Allow it in your browser settings, or use a photo.':'Couldn\'t start the camera. Use a photo instead.'}</p>`)}
-}
-function collectScanned(n){
-  const code=scanState.code,p=P(code),shelf=parseFloat(scanState.shelf),store=($('ss')&&$('ss').value.trim())||S.store;
-  const g=S.pending.find(x=>x.code===code)||S.pending.find(x=>!x.code&&p.type&&x.name.toLowerCase().includes(p.type));
-  const x=g?{...g,code}:{id:'_',code,qty:n};
-  doCollect(x,store||null,shelf>0?shelf:null,n);scanState.code=null;drawRes();
-}
+function clearDemo(){S.home=S.home.filter(x=>!x.demo);S.list=S.list.filter(x=>!x.demo);S.cart=S.cart.filter(x=>!x.demo);render();toast('Sample items cleared')}
 
-/* ================= RECIPES ================= */
-let recCache={},recState={key:null,items:null,err:null};
-function homeKeys(){const m={};S.home.filter(x=>x.rem>0).forEach(x=>{(m[x.type]=m[x.type]||[]).push(x)});return m}
-function expiringTypes(){return S.home.filter(x=>x.rem>0&&x.exp&&days(x.exp)<=4&&days(x.exp)>=0&&x.rem/x.total>=.3).sort((a,b)=>a.exp-b.exp)}
-function vRecipes(){
-  let h='',i=0;const ex=expiringTypes();
-  h+=`<div ${rv(i++)}><h1>Use it up</h1><p class="lede">${ex.length?'Recipes built around what\'s about to expire.':'Recipes from what you have at home.'}</p></div>`;
-  if(ex.length)h+=`<div class="note warn" ${rv(i++)}><strong>Expiring soon, mostly unused</strong>${ex.slice(0,4).map(x=>`${esc(label(x))} (${Math.round(x.rem/x.total*100)}% left, ${esc(expTxt(x.exp).toLowerCase())})`).join(', ')}</div>`;
-  if(!S.home.length)return h+`<div class="card glass empty" ${rv(i++)}><div class="big">Nothing at home yet</div>Put groceries away and recipes will appear here.</div>`;
-  h+=`<div id="recs" ${rv(i++)}><div class="card glass"><span class="spin"></span>&nbsp; Finding recipes…</div></div><p class="small" ${rv(i++)}>Recipes from TheMealDB.</p>`;
-  return h;
-}
-function matchIng(name,hk){const n=name.toLowerCase();for(const t in hk){if(n.includes(t)||(t.endsWith('s')&&n.includes(t.slice(0,-1)))||(n.split(' ').pop()===t+'s'))return t}return null}
-async function loadRecipes(){
-  const box=$('recs');if(!box)return;const hk=homeKeys(),ex=expiringTypes();
-  const targets=[...new Set([...ex.map(x=>x.type),...Object.keys(hk).sort((a,b)=>hk[b].length-hk[a].length)])].slice(0,3);
-  const key=targets.join('|')+'#'+Object.keys(hk).join(',');
-  try{
-    let list=[];
-    for(const t of targets){if(!recCache[t])recCache[t]=await recipesFor(t);recCache[t].slice(0,5).forEach(r=>{if(!list.some(y=>y.id===r.id))list.push({...r,for:t})})}
-    if(!$('recs'))return;
-    if(!list.length){box.innerHTML='<div class="card glass empty"><div class="big">No matches yet</div>No published recipes use these items. Try again after your next shop.</div>';return}
-    const det=(await Promise.all(list.slice(0,8).map(r=>recipeDetail(r.id).catch(()=>null)))).filter(Boolean);
-    const exT=new Set(ex.map(x=>x.type));
-    const scored=det.map(d=>{const ings=d.ings.map(g=>({...g,have:matchIng(g.name,hk)}));const have=ings.filter(g=>g.have).length,useExp=ings.filter(g=>g.have&&exT.has(g.have)).length;return {...d,ings,have,score:useExp*10+have/ings.length*5}}).sort((a,b)=>b.score-a.score);
-    recState.items=scored;
-    if(!$('recs'))return;
-    box.innerHTML=scored.map((r,ix)=>`<div class="recipe glass"><img src="${esc(r.thumb)}/preview" alt="" loading="lazy"><div><div class="nm">${esc(r.name)}</div><div class="sub">${esc([r.area,r.category].filter(Boolean).join(' · '))} · You have ${r.have} of ${r.ings.length}</div>
-      <div class="ing">${r.ings.slice(0,8).map(g=>`<span class="${g.have?(exT.has(g.have)?'exp':''):'miss'}">${esc(g.name)}</span>`).join('')}${r.ings.length>8?`<span class="miss">+${r.ings.length-8}</span>`:''}</div>
-      <div class="acts2"><button class="btn sm ghost" data-rview="${ix}">View</button><button class="btn sm" data-rmade="${ix}">I made this</button></div></div></div>`).join('');
-  }catch(e){if($('recs'))box.innerHTML='<div class="card glass empty"><div class="big">Offline</div>Couldn\'t reach the recipe service. Check your connection.</div>'}
-}
-function recipeView(ix){const r=recState.items[ix];if(!r)return;
-  open(`<img class="thumbimg" src="${esc(r.thumb)}" alt="" style="margin-top:0"><h1>${esc(r.name)}</h1><p class="muted">${esc([r.area,r.category].filter(Boolean).join(' · '))}</p>
-   <h2>Ingredients</h2><div class="card glass">${r.ings.map(g=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>${esc(g.name)}${g.measure?` <span class="small">· ${esc(g.measure)}</span>`:''}</span>${g.have?'<span class="chip good">At home</span>':'<span class="chip">Need</span>'}</div>`).join('')}</div>
-   <div class="acts2"><button class="btn ghost" data-rmiss="${ix}">Add missing to Pending</button><button class="btn" data-rmade="${ix}">I made this</button></div>
-   <h2>Method</h2><div class="steps">${r.steps.split(/\r?\n+/).filter(s=>s.trim()).map(s=>`<p>${esc(s)}</p>`).join('')}</div>${r.source?`<p><a class="link" href="${esc(r.source)}" target="_blank" rel="noopener">Original recipe</a></p>`:''}`)}
-function madeSheet(ix){const r=recState.items[ix],hk=homeKeys();const used=[...new Set(r.ings.map(g=>g.have).filter(Boolean))].map(t=>hk[t].sort((a,b)=>(a.exp||9e15)-(b.exp||9e15))[0]);
-  open(`<h1>How much did you use?</h1><p class="lede">${esc(r.name)}. Set what came out of each item. Nothing is deducted until you save.</p><form id="mf">${used.map(it=>`<div class="card glass"><div class="nm">${esc(label(it))}</div><div class="sub">${fmtAmt(it.rem,it.unit)} left</div>
-    <div class="big" style="font-size:28px" id="mo-${it.id}">${fmtAmt(0,it.unit)}</div><input type="range" data-mr="${it.id}" min="0" max="${it.rem}" step="${it.unit==='pcs'?1:Math.max(1,Math.round(it.total/200))}" value="0" aria-label="Amount of ${esc(label(it))}"></div>`).join('')||'<p class="muted">None of these ingredients are tracked at home.</p>'}
-    <div class="acts2"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn">Save</button></div></form>`);
-  $('panel').querySelectorAll('[data-mr]').forEach(s=>s.oninput=()=>{const it=S.home.find(x=>x.id===s.dataset.mr);$('mo-'+it.id).textContent=fmtAmt(+s.value,it.unit)});
-  $('mf').onsubmit=e=>{e.preventDefault();let n=0;$('panel').querySelectorAll('[data-mr]').forEach(s=>{const it=S.home.find(x=>x.id===s.dataset.mr);if(it&&+s.value>0){use(it,+s.value,r.name);n++}});if(!$('sheet').hidden&&$('mf'))close();render();toast(n?`Logged ${n} ingredient${n>1?'s':''} from ${r.name}`:'Nothing logged')}}
-
-/* ================= RECEIPTS ================= */
-const DB='larder-photos';
-function idb(){return new Promise((ok,no)=>{const r=indexedDB.open(DB,1);r.onupgradeneeded=()=>r.result.createObjectStore('p');r.onsuccess=()=>ok(r.result);r.onerror=()=>no(r.error)})}
-async function putPhoto(k,blob){const d=await idb();return new Promise((ok,no)=>{const t=d.transaction('p','readwrite');t.objectStore('p').put(blob,k);t.oncomplete=ok;t.onerror=()=>no(t.error)})}
-async function getPhoto(k){const d=await idb();return new Promise(ok=>{const q=d.transaction('p').objectStore('p').get(k);q.onsuccess=()=>ok(q.result||null);q.onerror=()=>ok(null)})}
-const tripKey=(t,store)=>dkey(t)+'|'+(store||'');
-function vReceipts(){
-  let h='',i=0;const m0=monthStart(),mt=spent(m0,now()+DAY);
-  const ps=[...S.purchases].sort((a,b)=>b.t-a.t);
-  h+=`<div ${rv(i++)}><h1>Receipts</h1><p class="lede">${money(mt)} this month</p></div>`;
-  if(!ps.length)return h+`<div class="card glass empty" ${rv(i++)}><div class="big">No purchases yet</div>Everything you collect shows up here, day by day.</div>`;
-  const days_={};ps.forEach(p=>{const d=dkey(p.t);(days_[d]=days_[d]||[]).push(p)});
-  Object.entries(days_).slice(0,60).forEach(([d,list])=>{
-    const dt=new Date(d+'T12:00'),tot=list.reduce((s,p)=>s+(p.price!=null?p.price*p.qty:0),0);
-    h+=`<div class="day" ${rv(i++)}><b>${days(dt)===0?'Today':days(dt)===-1?'Yesterday':dt.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'short'})}</b><span class="muted">${money(tot)}</span></div>`;
-    const trips={};list.forEach(p=>{(trips[p.store||'']=trips[p.store||'']||[]).push(p)});
-    Object.entries(trips).forEach(([st,items])=>{const tk=tripKey(items[0].t,st),sub=items.reduce((s,p)=>s+(p.price!=null?p.price*p.qty:0),0),np=items.filter(p=>p.price==null).length;
-      h+=`<div class="card glass trip" ${rv(i++)}><div class="head"><div><div class="nm">${esc(st||'Store not entered')}</div><div class="sub">${new Date(Math.min(...items.map(p=>p.t))).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})} · ${items.length} item${items.length>1?'s':''}</div></div><button class="btn sm ghost" data-rphoto="${esc(tk)}">Receipt photo</button></div>
-        ${items.map(p=>`<div class="line"><span>${p.qty>1?p.qty+' × ':''}${esc(p.code?title(P(p.code)):p.name)}</span><span>${p.price!=null?money(p.price*p.qty):'<span class="small">no price</span>'}</span><button class="x" data-delpur="${p.id}" aria-label="Remove from receipts">✕</button></div>`).join('')}
-        <div class="total" style="border:0"><span class="small">Total${np?` · ${np} without a price`:''}</span><b style="font-size:22px">${money(sub)}</b></div><div data-thumb="${esc(tk)}"></div></div>`});
-  });
-  return h;
-}
-async function loadReceiptThumbs(){for(const el of document.querySelectorAll('[data-thumb]')){try{const b=await getPhoto(el.dataset.thumb);if(b&&el.isConnected){el.innerHTML=`<img class="thumbimg" alt="Receipt photo" src="${URL.createObjectURL(b)}">`;const bt=el.parentElement.querySelector('[data-rphoto]');if(bt)bt.textContent='Replace photo'}}catch(e){return}}}
-
-/* ================= SAVINGS ================= */
-function vSavings(){
-  let h='',i=0;const sm=savedSince(monthStart()),all=savedSince(0);
-  h+=`<div ${rv(i++)}><p class="lede" style="margin:0">Saved this month</p><div class="big">${money(sm)}</div><p class="muted">${money(all)} in total, from paying less than the time before. Only real prices you recorded count.</p></div>`;
-  const m=[5,4,3,2,1,0].map(o=>({o,l:new Date(monthStart(o)).toLocaleDateString(undefined,{month:'short'}),v:spent(monthStart(o),o?monthStart(o-1):now()+DAY)}));
-  const mx=Math.max(...m.map(x=>x.v),1);
-  h+=`<h2 ${rv(i++)}>Spending by month</h2><div class="card glass bars" ${rv(i++)}>${m.map(x=>`<div class="barr"><span>${x.l}</span><i class="${x.o?'':'now'}" style="width:${Math.max(1.5,x.v/mx*100)}%"></i><span>${money(x.v)}</span></div>`).join('')}</div>`;
-  const keys=[...new Set(S.purchases.map(keyOf))];
-  const changes=keys.map(k=>{const h=priced(k);return h.length>=2&&Math.abs(h[0].price-h[1].price)>.004?{k,a:h[1],b:h[0]}:null}).filter(Boolean);
-  h+=`<h2 ${rv(i++)}>Price changes</h2><div class="card glass" ${rv(i++)}>${changes.length?changes.map(c=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(c.b.code?title(P(c.b.code)):c.b.name)}</div><div class="sub">${money(c.a.price)} → ${money(c.b.price)}${c.b.store?' at '+esc(c.b.store):''}, ${dstr(c.b.t)}</div></div><span class="chip ${c.b.price<c.a.price?'good':'warn'}">${c.b.price<c.a.price?'−':'+'}${money(Math.abs(c.b.price-c.a.price))}</span></div>`).join(''):'<p class="muted" style="margin:0">Buy something twice with a price and changes show up here.</p>'}</div>`;
-  const habits=keys.map(k=>{const all=S.purchases.filter(p=>keyOf(p)===k&&p.t>now()-60*DAY);const n=all.reduce((s,p)=>s+p.qty,0);const pr=priced(k);const cheap=[...pr].sort((a,b)=>a.price-b.price)[0];return {k,n,p:all[0],avg:pr.length?pr.reduce((s,x)=>s+x.price,0)/pr.length:null,cheap}}).filter(x=>x.n>=2).sort((a,b)=>b.n-a.n).slice(0,10);
-  h+=`<h2 ${rv(i++)}>Your habits, last 60 days</h2><div class="card glass" ${rv(i++)}>${habits.length?habits.map(x=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(x.p.code?title(P(x.p.code)):x.p.name)}</div><div class="sub">${x.avg!=null?'Average '+money(x.avg):'No prices yet'}${x.cheap?` · cheapest ${money(x.cheap.price)}${x.cheap.store?' at '+esc(x.cheap.store):''}`:''}</div></div><span class="chip">${x.n}×</span></div>`).join(''):'<p class="muted" style="margin:0">Habits appear once you buy something more than once.</p>'}</div>`;
-  return h;
-}
-
-/* ================= account ================= */
+/* ================= settings & account ================= */
 let prof=null;
+function settings(){
+  open(`<h1>Settings</h1>
+   <div class="set"><span><b>Add finished items to my list</b><br><span class="small">Without asking</span></span><input type="checkbox" id="sa" ${S.auto?'checked':''}></div>
+   <h2>Account and reminders</h2><div id="acct">${acctHtml()}</div>
+   <h2>Help</h2><div style="display:grid;gap:10px"><button class="btn ghost wide" id="stour">Show the welcome tour</button><button class="btn ghost wide" id="sdemo">Load sample items</button></div>
+   <h2>Your data</h2><p class="soft" style="margin-top:0">${ME?'Saved on this phone and synced to your account.':'Saved on this phone.'}</p><button class="btn ghost wide" id="serase">Erase everything</button>
+   <p class="small" style="margin-top:18px">Product details from Open Food Facts.</p>`);
+  bindAcct();
+  $('sa').onchange=e=>{S.auto=e.target.checked;save()};
+  $('stour').onclick=()=>{S.hints={};welcome(0)};
+  $('sdemo').onclick=()=>{loadDemo();close();render();goPage(0);toast('Sample items added')};
+  $('serase').onclick=()=>{const b=$('serase');if(b.dataset.sure){S=Object.assign(blank(),{onboarded:true});close();render();goPage(0,false);toast('Everything erased')}else{b.dataset.sure=1;b.textContent='Tap again to erase everything';b.style.borderColor='var(--red)'}};
+}
 function acctHtml(){
-  if(!cloud.enabled())return '<p class="muted" style="margin:0">Sign-in and reminders switch on once the Larder server is connected.</p>';
-  if(!ME)return `<form id="sif"><div class="field">Email<input type="email" id="sie" required autocomplete="email" placeholder="you@example.com" style="height:48px;border:1px solid var(--line);border-radius:14px;background:var(--g2);padding:0 14px;font-size:16px"></div><button class="btn" style="width:100%">Email me a sign-in link</button><p class="small" style="margin:8px 0 0">No password. Open the link on this phone to sign in.</p></form>`;
+  if(!cloud.enabled())return '<p class="soft">Sign-in isn\'t available right now.</p>';
+  if(!ME)return `<form id="sif"><label class="field">Email<input type="email" id="sie" required autocomplete="email" placeholder="you@example.com"></label><button class="btn wide">Email me a sign-in link</button><p class="small">Sign in to keep your lists on all your devices and get expiry reminders.</p></form>`;
   const ios=cloud.isIOS()&&!cloud.standalone();
-  return `<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><div><div class="nm" style="font-size:15px">${esc(ME.email)}</div><div class="sub">Signed in · syncing</div></div><button class="btn sm ghost" id="sout">Sign out</button></div>
-   <label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Push notifications<span class="src">${ios?'On iPhone: Share → Add to Home Screen, then open Larder from there to turn this on.':'Expiry, running low and price drops, around 9am'}</span></span><input type="checkbox" id="npush" ${prof&&prof.notify_push?'checked':''} ${ios?'disabled':''} style="width:24px;height:24px"></label>
-   <label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Email reminders<span class="src">The same alerts, sent to ${esc(ME.email)}</span></span><input type="checkbox" id="nmail" ${prof&&prof.notify_email?'checked':''} style="width:24px;height:24px"></label>
-   ${prof&&(prof.notify_push||prof.notify_email)?'<button class="btn sm ghost" id="ntest" style="margin-top:8px">Send me a test</button>':''}`;
+  return `<div class="set"><span><b>${esc(ME.email)}</b><br><span class="small">Signed in</span></span><button class="btn ghost" id="sout" style="min-height:48px">Sign out</button></div>
+   <div class="set"><span><b>Notifications</b><br><span class="small">${ios?'First add Flogger to your Home Screen and open it from there':'When food is about to expire'}</span></span><input type="checkbox" id="npush" ${prof&&prof.notify_push?'checked':''} ${ios?'disabled':''}></div>
+   <div class="set"><span><b>Email reminders</b><br><span class="small">The same reminders by email</span></span><input type="checkbox" id="nmail" ${prof&&prof.notify_email?'checked':''}></div>
+   ${prof&&(prof.notify_push||prof.notify_email)?'<button class="btn ghost wide" id="ntest" style="margin-top:10px">Send me a test</button>':''}`;
 }
 function bindAcct(){
-  const f=$('sif');if(f)f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('.btn');b.disabled=true;b.textContent='Sending…';try{await cloud.signIn($('sie').value.trim());$('acct').innerHTML=`<p style="margin:0"><strong>Check your email.</strong><br><span class="muted">Tap the link from ${esc($('sie')?$('sie').value:'your inbox')} on this phone.</span></p>`}catch(err){b.disabled=false;b.textContent='Email me a sign-in link';toast(err.message||'Couldn\'t send the link')}};
-  if($('sout'))$('sout').onclick=async()=>{await cloud.disablePush().catch(()=>{});await cloud.signOut();ME=null;prof=null;S.syncUser=null;save();settings();toast('Signed out. Your data stays on this phone')};
-  if($('npush'))$('npush').onchange=async e=>{const on=e.target.checked;try{if(on)await cloud.enablePush(ME.id);else await cloud.disablePush();prof={...(prof||{}),notify_push:on};await cloud.saveProfile(ME.id,{notify_push:on});toast(on?'Push notifications on':'Push notifications off')}catch(err){e.target.checked=false;toast(err.message==='denied'?'Notifications are blocked. Allow them in your browser settings.':err.message==='ios-home'?'Add Larder to your Home Screen first':'This browser can\'t do push notifications')}$('acct').innerHTML=acctHtml();bindAcct()};
-  if($('nmail'))$('nmail').onchange=async e=>{const on=e.target.checked;try{prof={...(prof||{}),notify_email:on};await cloud.saveProfile(ME.id,{notify_email:on,email:ME.email});toast(on?'Email reminders on':'Email reminders off')}catch(err){e.target.checked=!on;toast('Couldn\'t save')}$('acct').innerHTML=acctHtml();bindAcct()};
-  if($('ntest'))$('ntest').onclick=async()=>{try{const r=await cloud.testNotify();toast(`Test sent${r.pushed?' · push to '+r.pushed+' device'+(r.pushed>1?'s':''):''}${r.mailed?' · email':''}`)}catch(e){toast('Couldn\'t send the test')}};
+  const re=()=>{const a=$('acct');if(a){a.innerHTML=acctHtml();bindAcct()}};
+  const f=$('sif');if(f)f.onsubmit=async e=>{e.preventDefault();const b=f.querySelector('.btn');b.disabled=true;b.textContent='Sending…';try{await cloud.signIn($('sie').value.trim());$('acct').innerHTML=`<p><b>Check your email.</b><br><span class="soft">Open the link on this phone to sign in.</span></p>`}catch(err){b.disabled=false;b.textContent='Email me a sign-in link';toast('Couldn\'t send the link')}};
+  if($('sout'))$('sout').onclick=async()=>{await cloud.disablePush().catch(()=>{});await cloud.signOut();ME=null;prof=null;S.syncUser=null;save();re();toast('Signed out')};
+  if($('npush'))$('npush').onchange=async e=>{const on=e.target.checked;try{if(on)await cloud.enablePush(ME.id);else await cloud.disablePush();prof={...(prof||{}),notify_push:on};await cloud.saveProfile(ME.id,{notify_push:on});toast(on?'Notifications on':'Notifications off')}catch(err){e.target.checked=false;toast(err.message==='denied'?'Notifications are blocked in your settings':'This browser can\'t do notifications')}re()};
+  if($('nmail'))$('nmail').onchange=async e=>{const on=e.target.checked;try{prof={...(prof||{}),notify_email:on};await cloud.saveProfile(ME.id,{notify_email:on,email:ME.email});toast(on?'Email reminders on':'Email reminders off')}catch(err){e.target.checked=!on;toast('Couldn\'t save')}re()};
+  if($('ntest'))$('ntest').onclick=async()=>{try{const r=await cloud.testNotify();toast(r.pushed||r.mailed?'Test sent':'Nothing sent. Check the settings above.')}catch(e){toast('Couldn\'t send the test')}};
 }
 async function onSignedIn(u){
   let remote=null;try{remote=await cloud.pull(u.id)}catch(e){}
-  const localHas=S.pending.length+S.home.length+S.purchases.length+S.collected.length>0;
-  const adopt=()=>{const keep={onboarded:true};S=Object.assign(blank(),remote.state,keep);S.syncUser=u.id;save();render(true)};
+  if(remote&&remote.state&&remote.state.v!==3)remote.state=migrate(remote.state);
+  const localHas=S.list.length+S.home.length+S.cart.length>0;
+  const adopt=()=>{S=Object.assign(blank(),remote.state,{onboarded:true});S.syncUser=u.id;render()};
   const mine=()=>{S.syncUser=u.id;save()};
   if(remote&&S.syncUser!==u.id&&localHas){
-    open(`<h1>Which data should we keep?</h1><p class="lede">This phone and your account both have groceries saved.</p><div class="acts2"><button class="btn ghost" id="kp">This phone</button><button class="btn" id="ka">My account</button></div>`,()=>{if(S.syncUser!==u.id)mine()});
+    open(`<h1>Keep which groceries?</h1><p class="soft">This phone and your account both have items.</p><div class="acts"><button class="btn ghost" id="kp">This phone</button><button class="btn" id="ka">My account</button></div>`,{close:()=>{if(S.syncUser!==u.id)mine()}});
     $('kp').onclick=()=>{mine();close()};$('ka').onclick=()=>{adopt();close()};
   }else if(remote&&(S.syncUser!==u.id||new Date(remote.updated_at).getTime()>(S.updatedAt||0)))adopt();
   else mine();
-  try{prof=await cloud.getProfile(u.id);await cloud.saveProfile(u.id,{email:u.email,country:S.country,tz:Intl.DateTimeFormat().resolvedOptions().timeZone})}catch(e){}
-}
-
-/* ================= settings & onboarding ================= */
-function settings(){
-  open(`<h1>Settings</h1><div class="field">Country<select id="sc">${Object.entries(COUNTRIES).sort((a,b)=>a[1][0].localeCompare(b[1][0])).map(([k,v])=>`<option value="${k}" ${k===S.country?'selected':''}>${esc(v[0])} (${v[1]})</option>`).join('')}</select></div>
-   <div class="card glass"><label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Add finished items to Pending automatically</span><input type="checkbox" id="sa" ${S.auto?'checked':''} style="width:24px;height:24px"></label>
-   <label class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>Show where you last bought items</span><input type="checkbox" id="sv" ${S.showAv?'checked':''} style="width:24px;height:24px"></label></div>
-   <h2>Account and reminders</h2><div class="card glass" id="acct">${acctHtml()}</div>
-   <h2>Your stores</h2><div class="card glass">${S.stores.length?S.stores.map((s,ix)=>`<div class="row" style="grid-template-columns:minmax(0,1fr) auto"><span>${esc(s.name)}</span><button class="x" data-delstore="${ix}" aria-label="Remove ${esc(s.name)}">✕</button></div>`).join(''):'<p class="muted" style="margin:0">Stores you shop at appear here.</p>'}</div>
-   <h2>Your data</h2><p class="muted">${ME?'Saved on this phone and synced to your account.':'Saved on this phone. Sign in to sync across devices.'}</p><div class="acts2"><button class="btn ghost" id="sx">Copy backup</button><button class="btn ghost" id="serase">Erase everything</button></div>
-   <p class="small" style="margin-top:18px">Product info from Open Food Facts · Stores from OpenStreetMap · Recipes from TheMealDB</p>`);
-  bindAcct();
-  $('sc').onchange=()=>{S.country=$('sc').value;render();if(ME)cloud.saveProfile(ME.id,{country:S.country}).catch(()=>{})};$('sa').onchange=()=>{S.auto=$('sa').checked;save()};$('sv').onchange=()=>{S.showAv=$('sv').checked;render()};
-  $('sx').onclick=async()=>{try{await navigator.clipboard.writeText(JSON.stringify(S));toast('Backup copied')}catch(e){toast('Couldn\'t copy on this browser')}};
-  $('serase').onclick=()=>{const b=$('serase');if(b.dataset.sure){const c=S.country;S=blank();S.country=c;S.onboarded=true;close();render(true);toast('Everything erased')}else{b.dataset.sure=1;b.textContent='Tap again to erase';b.style.color='var(--amber)'}};
-}
-function onboard(){
-  open(`<h1>Welcome to Larder</h1><p class="lede">Your list at the store, and everything you have at home, in one calm place.</p>
-   <div class="field">Where do you shop?<select id="oc">${Object.entries(COUNTRIES).sort((a,b)=>a[1][0].localeCompare(b[1][0])).map(([k,v])=>`<option value="${k}" ${k===S.country?'selected':''}>${esc(v[0])}</option>`).join('')}</select></div>
-   <div class="field">What do you need? One per line<textarea id="oi" rows="4" placeholder="Milk&#10;Eggs&#10;Bread"></textarea></div>
-   <button class="btn" style="width:100%" id="ogo">Start</button>`,()=>{S.onboarded=true;save()});
-  $('ogo').onclick=()=>{S.country=$('oc').value;$('oi').value.split('\n').forEach(addPending);S.onboarded=true;close();render(true)};
+  try{prof=await cloud.getProfile(u.id);await cloud.saveProfile(u.id,{email:u.email,tz:Intl.DateTimeFormat().resolvedOptions().timeZone})}catch(e){}
 }
 
 /* ================= events ================= */
-$('nav').onclick=e=>{const b=e.target.closest('button');if(b)go(b.dataset.t)};
-$('savepill').onclick=()=>go('savings');
+$('fab').onclick=scanSheet;
 $('gear').onclick=settings;
 $('scrim').onclick=close;
-document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('sheet').hidden)close()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&sheetOpen())close()});
 $('tundo').onclick=()=>{if(undoFn){undoFn();undoFn=null;render()}$('toast').hidden=true};
-$('file').onchange=async()=>{const f=$('file').files[0];$('file').value='';if(!f)return;toast('Reading barcode…');try{const c=await decodeImage(f);if(c){$('toast').hidden=true;lookup(c)}else toast('No barcode found. Try closer, in good light.')}catch(e){toast('Couldn\'t read that photo')}};
-let photoKey=null;
-$('rfile').onchange=async()=>{const f=$('rfile').files[0];$('rfile').value='';if(!f||!photoKey)return;try{await putPhoto(photoKey,f);render();toast('Receipt photo saved')}catch(e){toast('Couldn\'t save the photo')}};
+$('file').onchange=async()=>{const f=$('file').files[0];$('file').value='';if(!f)return;toast('Reading barcode…');try{const c=await decodeImage(f);if(c){$('toast').hidden=true;if(!sheetOpen()||!$('sres'))scanSheet();gotCode(c)}else toast('No barcode found. Try closer, in good light.')}catch(e){toast('Couldn\'t read that photo')}};
 document.addEventListener('submit',e=>{
-  const id=e.target.id;
-  if(id==='addf'){e.preventDefault();addPending($('addin').value);render();$('addin').focus()}
-  if(id==='bcf'){e.preventDefault();lookup($('bcin').value)}
-  if(id==='newp'){e.preventDefault();const name=$('np-n').value.trim(),size=+$('np-s').value,unit=$('np-u').value,type=guessType(name);
-    S.products[scanState.code]={code:scanState.code,brand:$('np-b').value.trim(),name,label:size+' '+unit,size,unit,image:null,type,shape:guessShape(type,[],[],size,unit),storage:$('np-st').value.trim()||null,storageSrc:'Typed from the label by you',allergens:[],traces:[],ingredients:null,nutrition:[],nutriscore:null,categories:[],src:'You'};
-    scanState.err=null;save();drawRes();cloud.shareProduct(scanState.code,{...S.products[scanState.code],src:'Shared by a shopper'}).then(ok=>toast(ok?'Product saved and shared':'Product saved'))}
+  if(e.target.id==='addf'){e.preventDefault();const v=$('addin').value.trim();if(!v)return;addToList(v);render();const i=$('addin');i.focus()}
+  if(e.target.id==='findf'){e.preventDefault();const q=$('findin').value.toLowerCase().trim();if(!q)return;const hit=S.home.find(x=>(nameOf(x)+' '+x.type).toLowerCase().includes(q));
+    if(hit){S.place=hit.place;S.cat='all';render();toast(`${nameOf(hit)} is in the ${PL[hit.place].toLowerCase()}`);setTimeout(()=>{const el=document.querySelector(`[data-item="${hit.id}"]`);if(el){el.scrollIntoView({block:'center',behavior:reduce?'auto':'smooth'});el.style.outline='4px solid var(--ink)';setTimeout(()=>el.style.outline='',1800)}},60)}
+    else toast(`No “${q}” at home`)}
 });
-document.addEventListener('input',e=>{
-  if(e.target.id==='q'){S.q=e.target.value;const pos=e.target.selectionStart;render();const q=$('q');q.focus();try{q.setSelectionRange(pos,pos)}catch(_){}}
-  if(e.target.id==='shelf'){scanState.shelf=e.target.value;const b=$('insbox');if(b)b.innerHTML=insHtml()}
-});
-document.addEventListener('change',e=>{if(e.target.id==='ss'){const v=e.target.value.trim();if(v){rememberStore(v);save();const b=$('insbox');if(b)b.innerHTML=insHtml()}}});
 document.addEventListener('click',e=>{
-  const t=e.target.closest('button,[data-go]');if(!t)return;const d=t.dataset;
-  if('close' in d)close();
-  if(d.go)go(d.go);
-  if(d.seg){seg=d.seg;render()}
-  if(d.collect)collectSheet(d.collect);
-  if(d.q){const x=S.pending.find(y=>y.id===d.q);if(x){x.qty=Math.max(1,x.qty+ +d.d);render()}}
-  if(d.qc){const x=S.collected.find(y=>y.id===d.qc);if(x){x.qty=Math.max(1,x.qty+ +d.d);const pu=S.purchases.find(p=>p.id===x.pid);if(pu)pu.qty=x.qty;render()}}
-  if(d.delp){const i=S.pending.findIndex(y=>y.id===d.delp),x=S.pending[i];S.pending.splice(i,1);render();toast('Deleted',()=>S.pending.splice(i,0,x))}
-  if(d.delc){const x=S.collected.find(y=>y.id===d.delc);S.collected=S.collected.filter(y=>y!==x);S.purchases=S.purchases.filter(p=>p.id!==x.pid);S.pending.unshift({id:uid(),code:x.code,name:x.name,qty:x.qty});render();toast('Moved back to Pending')}
-  if(d.away)awaySheet([d.away]);
-  if('awayall' in d){const known=S.collected.filter(x=>P(x.code)&&P(x.code).size).map(x=>x.id);awaySheet(known.length?known:[S.collected[0].id])}
-  if(d.loc){$('al').value=d.loc}
-  if(d.setstore){const inp=$(d.target);if(inp){inp.value=d.setstore;rememberStore(d.setstore,d.osm,d.lat?+d.lat:null,d.lon?+d.lon:null);if(d.target==='ss'){save();const b=$('insbox');if(b)b.innerHTML=insHtml()}}}
-  if(d.near){findNear(d.near)}
-  if(d.det)detail(d.det);
-  if(d.unlog){const it=S.home.find(x=>x.id===d.unlog);const l=it&&it.logs.pop();if(l){it.rem=Math.min(it.total,it.rem+l.a);save();render();refreshDetail(it);toast('Undone')}}
-  if(d.finish){const it=S.home.find(x=>x.id===d.finish);if(it){close();finished(it)}}
-  if(d.addstorage){const p=P(d.addstorage);open(`<h1>Storage from the label</h1><p class="lede">Type exactly what the package says.</p><form id="stf"><div class="field">Label text<input type="text" id="stt" placeholder="e.g. Refrigerate after opening" required></div><button class="btn" style="width:100%">Save</button></form>`);$('stf').onsubmit=ev=>{ev.preventDefault();p.storage=$('stt').value.trim();p.storageSrc='Typed from the label by you';save();close();render();toast('Saved')}}
-  if(t.id==='camgo')camera();
-  if(t.id==='photo')$('file').click();
-  if('retry' in d)lookup(scanState.code);
-  if(d.buy){collectScanned(+d.buy)}
-  if('skip' in d){scanState.code=null;drawRes();toast('Skipped. You have enough at home')}
-  if('topend' in d){const code=scanState.code,p=P(code);const g=S.pending.find(x=>!x.code&&p.type&&x.name.toLowerCase().includes(p.type));if(g){g.code=code;delete g.name}else if(!S.pending.some(x=>x.code===code))S.pending.unshift({id:uid(),code,qty:1});scanState.code=null;save();drawRes();toast('Added to Pending')}
-  if('oos' in d){if(!ME){toast('Sign in (Settings) to share stock reports');return}const store=($('ss')&&$('ss').value.trim())||S.store;if(!store){toast('Pick the store first');return}const si=storeInfo(store);rememberStore(store);cloud.report({code:scanState.code,store_name:store,store_osm:si.id||null,lat:si.lat??null,lon:si.lon??null,country:S.country,currency:COUNTRIES[S.country][1],price:null,in_stock:false}).then(ok=>{delete repCache[scanState.code];const b=$('repbox');if(b)b.innerHTML=repHtml(scanState.code);toast(ok?'Thanks. Others will see it\'s out of stock here':'Couldn\'t send the report')})}
-  if(d.rview)recipeView(+d.rview);
-  if(d.rmade){madeSheet(+d.rmade)}
-  if(d.rmiss){const r=recState.items[+d.rmiss];r.ings.filter(g=>!g.have).forEach(g=>addPending(g.name));close();render();toast('Missing ingredients added to Pending')}
-  if(d.rphoto){photoKey=d.rphoto;$('rfile').click()}
-  if(d.delpur){const i=S.purchases.findIndex(p=>p.id===d.delpur),p=S.purchases[i];S.purchases.splice(i,1);render();toast('Removed from receipts',()=>S.purchases.splice(i,0,p))}
-  if(d.delstore){S.stores.splice(+d.delstore,1);save();settings()}
+  const t=e.target.closest('button');if(!t)return;const d=t.dataset;
+  if(d.tocart)moveToCart(d.tocart);
+  if(d.uncart)backToList(d.uncart);
+  if(d.del){const [w,id]=d.del.split(':');if('andclose' in d)close();del(w,id)}
+  if('close' in d&&!d.del)close();
+  if(d.qty){const [w,id]=d.qty.split(':');qtySheet(w,id)}
+  if(d.quick){const r=S.recent.find(x=>keyOf(x)===d.quick);if(r){if(r.code)addToList(null,r.code);else addToList(r.name);render()}}
+  if('putaway' in d)putAwaySheet(S.cart.map(x=>({...x,from:'cart'})));
+  if(d.place){S.place=d.place;S.cat='all';render()}
+  if(d.cat){S.cat=d.cat;render()}
+  if(d.open)detail(d.open);
+  if(d.lvl){const it=curItem();if(it)setLevel(it,+d.lvl)}
+  if(d.mv){const it=curItem();if(it){it.place=d.mv;drawDetail(it);render();toast(`Moved to the ${PL[d.mv].toLowerCase()}`)}}
+  if(d.setcat){const it=curItem();if(it){it.cat=d.setcat;drawDetail(it);render()}}
+  if(d.hint){S.hints[d.hint]=1;render()}
+  if('cleardemo' in d)clearDemo();
+  if(d.mode){S.scanMode=d.mode;save();t.parentElement.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b===t)));SC.single=null;drawTray();startCam()}
+  if(d.untray){const arr=S.scanMode==='one'&&SC.single?[SC.single]:SC.tray;const x=arr[+d.untray];SC.tray=SC.tray.filter(y=>y!==x);if(SC.single===x){SC.single=null;startCam()}drawTray()}
+  if(d.send)sendTray(d.send);
+  if(d.nameit)nameIt(+d.nameit);
 });
-window.addEventListener('hashchange',()=>{const t=location.hash.slice(1);if(t&&t!==tab&&['list','home','scan','recipes','receipts','savings'].includes(t))go(t)});
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&stopCam){stopCam();stopCam=null;if(tab==='scan')render()}});
+function curItem(){const b=document.querySelector('#dbody [data-del^="home:"]');return b&&S.home.find(x=>x.id===b.dataset.del.split(':')[1])}
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopScanner();else if(sheetOpen()&&$('vid')&&!SC.stop&&!(S.scanMode==='one'&&SC.single))startCam()});
 
-render(true);
-if(!S.onboarded)setTimeout(onboard,500);
-if(cloud.enabled()){cloud.onAuth(async u=>{const was=ME&&ME.id;ME=u;if(u&&u.id!==was){await onSignedIn(u);if(/[?&]code=/.test(location.search))history.replaceState(null,'',location.pathname+'#'+tab);toast('Signed in as '+u.email)}render()})}
+/* ================= start ================= */
+let S=load();
+render();
+requestAnimationFrame(()=>{onScroll()});
+if(!S.onboarded)setTimeout(()=>welcome(0),350);
+if(cloud.enabled()){cloud.onAuth(async u=>{const was=ME&&ME.id;ME=u;if(u&&u.id!==was){await onSignedIn(u);if(/[?&]code=/.test(location.search))history.replaceState(null,'',location.pathname);toast('Signed in')}render()})}
 if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});

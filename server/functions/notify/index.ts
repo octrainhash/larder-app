@@ -1,4 +1,4 @@
-// Larder reminders: push notifications and emails.
+// Flogger reminders: push notifications and emails.
 // Runs every hour (see cron.sql). Each person gets alerts once a day, around 9am their time.
 // Also answers {"test":true} from a signed-in user with a test notification.
 import {createClient} from 'npm:@supabase/supabase-js@2.45.4';
@@ -28,7 +28,7 @@ async function alertsFor(userId: string, state: any, tz: string): Promise<Alert[
     if (!it || it.rem <= 0) continue;
     if (it.exp) {
       const d = daysUntil(it.exp, tz), left = it.rem / it.total;
-      if (d >= 0 && d <= 1 && left >= 0.3) out.push({key: `exp:${it.id}:${new Date(it.exp).toISOString().slice(0, 10)}`, title: `${name(state, it)} ${d === 0 ? 'expires today' : 'expires tomorrow'}`, body: `${Math.round(left * 100)}% is still left. Open Larder for recipes to use it up.`});
+      if (d >= 0 && d <= 1 && left >= 0.3) out.push({key: `exp:${it.id}:${new Date(it.exp).toISOString().slice(0, 10)}`, title: `${name(state, it)} ${d === 0 ? 'expires today' : 'expires tomorrow'}`, body: `${Math.round(left * 100)}% is still left. Open Flogger to use it up.`});
     }
     const logs = it.logs ?? [];
     if (logs.length >= 2) {
@@ -72,12 +72,12 @@ async function push(userId: string, title: string, body: string) {
 async function email(to: string, subject: string, alerts: Alert[]) {
   if (!env('RESEND_API_KEY') || !to) return false;
   const html = `<div style="font-family:Georgia,serif;color:#1d1419;max-width:520px;margin:auto;padding:24px">
-    <h1 style="font-weight:600;font-size:28px;margin:0 0 16px">Larder</h1>
+    <h1 style="font-weight:600;font-size:28px;margin:0 0 16px">Flogger</h1>
     ${alerts.map(a => `<div style="background:#f7f0f2;border-radius:16px;padding:14px 16px;margin:0 0 10px;font-family:Helvetica,Arial,sans-serif"><strong>${a.title}</strong><br><span style="color:#6f6268">${a.body}</span></div>`).join('')}
-    <p style="font-family:Helvetica,Arial,sans-serif"><a href="${APP_URL}" style="color:#3b1d2c">Open Larder</a></p>
-    <p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a7a82">You get this because email reminders are on in Larder settings.</p></div>`;
+    <p style="font-family:Helvetica,Arial,sans-serif"><a href="${APP_URL}" style="color:#0B5FA5">Open Flogger</a></p>
+    <p style="font-family:Helvetica,Arial,sans-serif;font-size:12px;color:#8a7a82">You get this because email reminders are on in Flogger settings.</p></div>`;
   const r = await fetch('https://api.resend.com/emails', {method: 'POST', headers: {Authorization: `Bearer ${env('RESEND_API_KEY')}`, 'Content-Type': 'application/json'},
-    body: JSON.stringify({from: env('EMAIL_FROM') || 'Larder <onboarding@resend.dev>', to: [to], subject, html})});
+    body: JSON.stringify({from: env('EMAIL_FROM') || 'Flogger <onboarding@resend.dev>', to: [to], subject, html})});
   return r.ok;
 }
 
@@ -92,9 +92,9 @@ Deno.serve(async req => {
     const {data: {user}} = await db.auth.getUser(token);
     if (!user) return json({error: 'Sign in first'}, 401);
     const {data: prof} = await db.from('profiles').select('*').eq('user_id', user.id).maybeSingle();
-    const a: Alert = {key: 'test', title: 'Larder notifications are on', body: "This is what a reminder looks like. We'll only send ones that matter."};
+    const a: Alert = {key: 'test', title: 'Flogger notifications are on', body: "This is what a reminder looks like. We'll only send ones that matter."};
     const pushed = prof?.notify_push ? await push(user.id, a.title, a.body) : 0;
-    const mailed = prof?.notify_email ? await email(prof.email ?? user.email ?? '', 'Larder: test reminder', [a]) : false;
+    const mailed = prof?.notify_email ? await email(prof.email ?? user.email ?? '', 'Flogger: test reminder', [a]) : false;
     return json({pushed, mailed});
   }
 

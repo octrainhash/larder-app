@@ -21,7 +21,8 @@ function zxDecodeCanvas(c){
 }
 const valid=s=>/^\d{8,14}$/.test(s)?s:(s&&s.length>=4?s:null);
 
-export async function startScan(video,onCode){
+export async function startScan(video,onCode,opts={}){
+  const multi=!!opts.multi;const seen={};
   const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
   video.srcObject=stream;video.setAttribute('playsinline','');video.muted=true;await video.play();
   const det=await getNative();
@@ -37,7 +38,10 @@ export async function startScan(video,onCode){
           // centre band where people hold the barcode
           const bh=vh*.5;c.width=cw;c.height=Math.round(bh*s);x.drawImage(video,0,(vh-bh)/2,vw,bh,0,0,c.width,c.height);code=zxDecodeCanvas(c)}
         code=valid(code);
-        if(code&&on){on=false;stop();onCode(code);return}
+        if(code&&on){
+          if(!multi){on=false;stop();onCode(code);return}
+          const t=Date.now();if(!seen[code]||t-seen[code]>2500){seen[code]=t;onCode(code)}else seen[code]=t;
+        }
       }catch(e){}
       busy=false}
     setTimeout(tick,det?120:220);
