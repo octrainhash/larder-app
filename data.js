@@ -58,6 +58,8 @@ const TYPES=['milk','egg','spinach','yogurt','yoghurt','cheddar','mozzarella','c
  'chocolate','beans','lentils','chickpeas','salt','pepper','ketchup','mayonnaise','mustard','soda','cola','biscuit','cookie','crackers','chips','ice cream','frozen'];
 export function guessType(name,cats){
   const hay=' '+String(name||'').toLowerCase()+' ';
+  const words=hay.trim().split(/\s+/),last=words[words.length-1]||'',two=words.slice(-2).join(' ');
+  for(const w of [two,last,last.replace(/s$/,''),last.replace(/es$/,'')])if(TYPES.includes(w))return w==='yoghurt'?'yogurt':w;
   for(const t of TYPES)if(hay.includes(' '+t))return t==='yoghurt'?'yogurt':t;
   const c=(cats||[]).map(x=>x.replace(/^\w\w:/,'').replace(/-/g,' ')).join(' | ');
   for(const t of TYPES)if(c.includes(t))return t==='yoghurt'?'yogurt':t;

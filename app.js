@@ -93,8 +93,8 @@ const SH={carton:['M22 36 L40 16 L58 36 L58 112 Q58 116 54 116 L26 116 Q22 116 2
 const FILLS={dairy:'#F2EEE6',meat:'#E9A38A',produce:'#7FBF6A',bakery:'#D9A066',snacks:'#F0C44C',drinks:'#E69F00',frozen:'#9CC3EA',grains:'#E8D39A',jars:'#C2452D',other:'#B9A7C9'};
 const TFILL={milk:'#F2EEE6',yogurt:'#F5F1EA',egg:'#E8CFA9',juice:'#F0A640',orange:'#F0A640',oil:'#C9A43A','olive oil':'#B59A2C',water:'#BFE3F5',coffee:'#7A4E35',tea:'#B07A45',tomato:'#C8432F',ketchup:'#B5281E','ice cream':'#F6D9E4',rice:'#F1ECDF',cheese:'#F0C25A',cheddar:'#EDB54A',butter:'#F3DC8A',chocolate:'#6B3E2A'};
 let vid=0;
-function vessel(shape,lvl,color){
-  const [d,t,b]=SH[shape]||SH.bag,id='v'+(++vid),y=t+(1-Math.max(0,Math.min(1,lvl)))*(b-t);
+function vessel(shape,lvl,color,key){
+  const [d,t,b]=SH[shape]||SH.bag,id='v'+(key||('x'+(++vid))),y=t+(1-Math.max(0,Math.min(1,lvl)))*(b-t);
   return `<svg viewBox="0 0 80 124" aria-hidden="true"><defs><clipPath id="${id}"><path d="${d}"/></clipPath></defs><ellipse cx="40" cy="119" rx="26" ry="3.5" fill="#14171C" opacity=".12"/><path d="${d}" fill="#F4F5F7"/>
   <g clip-path="url(#${id})"><rect x="0" y="${y}" width="80" height="${124-y}" fill="${color}"/><rect x="0" y="${y}" width="80" height="2.5" fill="#14171C" opacity=".35"/><rect x="24" y="${t+6}" width="3" height="${(b-t)*.5}" rx="1.5" fill="#fff" opacity=".8"/></g>
   <path d="${d}" fill="none" stroke="#14171C" stroke-width="2.2"/></svg>`;
@@ -107,17 +107,19 @@ function entry(code,name){const p=P(code);const type=p?p.type:guessType(name||''
 function remember(x){const k=keyOf(x);S.recent=[{code:x.code||null,name:x.code?null:x.name,type:typeOf(x)},...S.recent.filter(r=>keyOf(r)!==k)].slice(0,24)}
 
 /* ================= rendering ================= */
-let page=0;
+let page=0;const fresh=new Set();const haptic=(n=12)=>{try{navigator.vibrate&&navigator.vibrate(n)}catch(e){}};
+const lastN={};
 function tabs(){
   const lab=[['list','List',S.list.length],['cart','In cart',S.cart.length],['home','At home',S.home.length]];
-  lab.forEach(([k,l,n],i)=>{const b=$('t-'+k);b.innerHTML=`${ic(k)}${l}${n?`<span class="n">${n}</span>`:''}`;b.setAttribute('aria-selected',String(i===page))});
+  lab.forEach(([k,l,n],i)=>{const b=$('t-'+k),grew=lastN[k]!=null&&n>lastN[k];const html=`${ic(k)}${l}${n?`<span class="n${grew?' pulse':''}">${n}</span>`:''}`;if(b._h!==html.replace(' pulse','')||grew){b.innerHTML=html;b._h=html.replace(' pulse','')}lastN[k]=n;b.setAttribute('aria-selected',String(i===page))});
 }
-function hint(k,title,text){if(S.hints[k])return '';return `<div class="hint" role="note"><div><b>${title}</b>${text}</div><button data-hint="${k}" aria-label="Got it">${ic('close')}</button></div>`}
+const shownHints=new Set();
+function hint(k,title,text){if(S.hints[k])return '';const first=!shownHints.has(k);shownHints.add(k);return `<div class="hint${first?' pop':''}" role="note"><div><b>${title}</b>${text}</div><button data-hint="${k}" aria-label="Got it">${ic('close')}</button></div>`}
 function demoBar(){return S.home.concat(S.list,S.cart).some(x=>x.demo)?`<div class="demo"><span>These are sample items</span><button class="btn ghost" data-cleardemo>Clear them</button></div>`:''}
 
 function rowHtml(x,where){
   const p=P(x.code),cat=x.cat||(p&&enrich(p).cat)||catOf(typeOf(x));
-  return `<div class="row" data-row="${x.id}">
+  return `<div class="row${fresh.has(x.id)?' in':''}" data-row="${x.id}">
     <button class="chk${where==='cart'?' on':''}" data-${where==='cart'?'uncart':'tocart'}="${x.id}" aria-label="${where==='cart'?'Put back on list':'Got it, move to cart'}: ${esc(nameOf(x))}">${where==='cart'?ic('check'):''}</button>
     <button class="tap" data-qty="${where}:${x.id}">${catIcon(cat)}<span class="nm">${esc(nameOf(x))}${x.qty>1?`<span class="qty">×${x.qty}</span>`:''}</span></button>
     <button class="del" data-del="${where}:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`;
@@ -155,15 +157,14 @@ function vHome(){
   if(cats.length>1)h+=`<div class="cats" role="group" aria-label="Food type"><button data-cat="all" aria-pressed="${S.cat==='all'}">${`<span class="ci" style="background:#ECEEF1">${ic('all')}</span>`}All</button>${cats.map(c=>`<button data-cat="${c[0]}" aria-pressed="${S.cat===c[0]}">${catIcon(c[0])}${c[1]}</button>`).join('')}</div>`;
   const shown=here.filter(x=>S.cat==='all'||x.cat===S.cat).sort((a,b)=>(a.exp||9e15)-(b.exp||9e15));
   if(!shown.length)return h+`<div class="card empty">${art(S.place)}<b>Your ${PL[S.place].toLowerCase()} is empty</b><span class="soft">Things you put away will show up here.</span></div>`;
-  h+=`<div class="grid">${shown.map(x=>`<div class="item" data-item="${x.id}"><button data-open="${x.id}" style="text-align:left;display:flex;flex-direction:column" aria-label="${esc(nameOf(x))}, ${esc(levelTxt(x))}"><span class="pic">${vessel(x.shape,x.rem/x.total,fillOf(x))}</span><span class="nm">${esc(nameOf(x))}</span><span class="lvl">${Math.round(x.rem/x.total*100)}% left</span><span class="meter"><i style="width:${Math.round(x.rem/x.total*100)}%"></i></span>${expChip(x)}</button><button class="del" data-del="home:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`).join('')}</div>`;
+  h+=`<div class="grid">${shown.map(x=>`<div class="item${fresh.has(x.id)?' in':''}" data-item="${x.id}"><button data-open="${x.id}" style="text-align:left;display:flex;flex-direction:column" aria-label="${esc(nameOf(x))}, ${esc(levelTxt(x))}"><span class="pic">${vessel(x.shape,x.rem/x.total,fillOf(x),x.id)}</span><span class="nm">${esc(nameOf(x))}</span><span class="lvl">${Math.round(x.rem/x.total*100)}% left</span><span class="meter"><i style="width:${Math.round(x.rem/x.total*100)}%"></i></span>${expChip(x)}</button><button class="del" data-del="home:${x.id}" aria-label="Delete ${esc(nameOf(x))}">${ic('trash')}</button></div>`).join('')}</div>`;
   h+=`<form class="add" id="findf" style="margin-top:18px"><input type="search" id="findin" placeholder="Where's my…" aria-label="Find an item at home"><button class="btn sq ghost" aria-label="Find">${ic('search')}</button></form>`;
   return h;
 }
 function render(){
   tabs();
-  const keep=[0,1,2].map(i=>$('pager').children[i].scrollTop);
-  $('p-list').innerHTML=vList();$('p-cart').innerHTML=vCart();$('p-home').innerHTML=vHome();
-  [0,1,2].forEach(i=>$('pager').children[i].scrollTop=keep[i]);
+  [['p-list',vList],['p-cart',vCart],['p-home',vHome]].forEach(([id,fn])=>{const el=$(id),h=fn();if(el._h!==h){const top=el.scrollTop,f=document.activeElement,fid=f&&el.contains(f)&&f.id;el.innerHTML=h;el._h=h;el.scrollTop=top;if(fid&&$(fid))$(fid).focus()}});
+  fresh.clear();
   save();
 }
 
@@ -177,8 +178,16 @@ window.addEventListener('resize',()=>goPage(page,false));
 
 /* ================= sheets & toast ================= */
 let viewer=null,onClose=null,undoFn=null,tt=0;
-function open(h,{full=false,close}={}){closeViewer();const p=$('panel');p.className='panel'+(full?' full':'');p.innerHTML=(full?'':'<div class="grab"></div>')+`<button class="shut" data-close aria-label="Close">${ic('close')}</button>`+h;$('sheet').hidden=false;onClose=close||null;p.scrollTop=0}
-function close(){closeViewer();stopScanner();$('sheet').hidden=true;const f=onClose;onClose=null;f&&f()}
+function open(h,{full=false,close}={}){closeViewer();const p=$('panel');p.style.transform='';p.style.transition='';p.className='panel'+(full?' full':'');p.innerHTML=(full?'':'<div class="grab"></div>')+`<button class="shut" data-close aria-label="Close">${ic('close')}</button>`+h;$('sheet').hidden=false;onClose=close||null;p.scrollTop=0}
+let closing=false;
+function close(){if(closing||$('sheet').hidden)return;closing=true;closeViewer();stopScanner();const p=$('panel'),done=()=>{$('sheet').hidden=true;$('sheet').classList.remove('leaving');p.style.transform='';p.style.transition='';closing=false;const f=onClose;onClose=null;f&&f()};
+  if(reduce)return done();$('sheet').classList.add('leaving');p.style.transition='transform .26s cubic-bezier(.4,0,1,1)';p.style.transform='translateY(105%)';setTimeout(done,240)}
+{ // swipe down on a panel to close it
+  const p=$('panel');let y0=null,dy=0,t0=0;
+  p.addEventListener('touchstart',e=>{if(e.target.closest('.viewer,input,select,.scanv,.cats,.quick'))return;if(p.scrollTop>0)return;y0=e.touches[0].clientY;dy=0;t0=Date.now();p.style.transition='none'},{passive:true});
+  p.addEventListener('touchmove',e=>{if(y0==null)return;dy=e.touches[0].clientY-y0;if(dy>0&&p.scrollTop<=0){p.style.transform=`translateY(${dy}px)`}else{dy=0;p.style.transform=''}},{passive:true});
+  p.addEventListener('touchend',()=>{if(y0==null)return;const fast=dy>60&&Date.now()-t0<250;y0=null;if(dy>130||fast){close()}else{p.style.transition='transform .3s cubic-bezier(.2,.9,.3,1.2)';p.style.transform=''}});
+}
 function closeViewer(){if(viewer){viewer.dispose();viewer=null}}
 function toast(m,u){$('tmsg').textContent=m;undoFn=u||null;$('tundo').hidden=!u;$('toast').hidden=false;clearTimeout(tt);tt=setTimeout(()=>$('toast').hidden=true,u?6000:2800)}
 const sheetOpen=()=>!$('sheet').hidden;
@@ -187,16 +196,24 @@ const sheetOpen=()=>!$('sheet').hidden;
 function addToList(name,code){
   const e=code?entry(code):entry(null,name);
   const same=S.list.find(x=>keyOf(x)===keyOf(e));
-  if(same)same.qty++;else S.list.unshift({id:uid(),...e,qty:1});
+  if(same){same.qty++;fresh.add(same.id)}else{const n={id:uid(),...e,qty:1};S.list.unshift(n);fresh.add(n.id)}haptic(10);
   remember(e);
 }
 function animateOut(id,cls,done){const el=document.querySelector(`[data-row="${id}"],[data-item="${id}"]`);if(!el||reduce)return done();el.classList.add(cls);setTimeout(done,260)}
-function moveToCart(id){const i=S.list.findIndex(x=>x.id===id);if(i<0)return;const x=S.list[i];
-  animateOut(id,'out',()=>{S.list.splice(i,1);S.cart.unshift(x);render();toast(`${nameOf(x)} is in your cart`,()=>{S.cart=S.cart.filter(y=>y!==x);S.list.splice(i,0,x)})})}
-function backToList(id){const i=S.cart.findIndex(x=>x.id===id);if(i<0)return;const x=S.cart[i];
-  animateOut(id,'gone',()=>{S.cart.splice(i,1);S.list.unshift(x);render();toast(`${nameOf(x)} is back on your list`)})}
-function del(where,id){const arr=S[where],i=arr.findIndex(x=>x.id===id);if(i<0)return;const x=arr[i];
-  animateOut(id,'gone',()=>{arr.splice(i,1);render();toast(`Deleted ${nameOf(x)}`,()=>arr.splice(i,0,x))})}
+function fly(fromEl,toTab){
+  if(reduce||!fromEl)return;const a=fromEl.getBoundingClientRect(),b=$(toTab).getBoundingClientRect();
+  const g=document.createElement('div');g.className='flyer';g.innerHTML=fromEl.innerHTML;document.body.appendChild(g);
+  g.style.left=a.left+'px';g.style.top=a.top+'px';
+  const dx=b.left+b.width/2-(a.left+a.width/2),dy=b.top+b.height/2-(a.top+a.height/2);
+  g.animate([{transform:'translate(0,0) scale(1)',opacity:1},{transform:`translate(${dx*.6}px,${dy*.5-40}px) scale(.8)`,opacity:1,offset:.55},{transform:`translate(${dx}px,${dy}px) scale(.3)`,opacity:.2}],{duration:620,easing:'cubic-bezier(.3,.7,.4,1)'}).onfinish=()=>g.remove();
+}
+function moveToCart(id){const i=S.list.findIndex(x=>x.id===id);if(i<0)return;const x=S.list[i];haptic(15);
+  const row=document.querySelector(`[data-row="${id}"] .tap`);fly(row,'t-cart');
+  animateOut(id,'out',()=>{S.list.splice(i,1);S.cart.unshift(x);fresh.add(x.id);render();toast(`${nameOf(x)} is in your cart`,()=>{S.cart=S.cart.filter(y=>y!==x);S.list.splice(i,0,x);fresh.add(x.id)})})}
+function backToList(id){const i=S.cart.findIndex(x=>x.id===id);if(i<0)return;const x=S.cart[i];haptic(12);fly(document.querySelector(`[data-row="${id}"] .tap`),'t-list');
+  animateOut(id,'gone',()=>{S.cart.splice(i,1);S.list.unshift(x);fresh.add(x.id);render();toast(`${nameOf(x)} is back on your list`)})}
+function del(where,id){const arr=S[where],i=arr.findIndex(x=>x.id===id);if(i<0)return;const x=arr[i];haptic(20);
+  animateOut(id,'gone',()=>{arr.splice(i,1);render();toast(`Deleted ${nameOf(x)}`,()=>{arr.splice(i,0,x);fresh.add(x.id)})})}
 function qtySheet(where,id){const x=S[where].find(y=>y.id===id);if(!x)return;
   open(`<h1>${esc(nameOf(x))}</h1><div style="display:flex;align-items:center;justify-content:center;gap:22px;margin:18px 0 22px"><button class="btn ghost sq" data-q="-1" aria-label="Fewer">${ic('minus')}</button><span id="qv" style="font-size:48px;font-weight:700;min-width:60px;text-align:center">${x.qty}</span><button class="btn ghost sq" data-q="1" aria-label="More">${ic('plus')}</button></div>
    <div class="acts"><button class="btn ghost" data-del="${where}:${x.id}" data-andclose>${ic('trash')}Delete</button><button class="btn" data-close>Done</button></div>`);
@@ -216,10 +233,10 @@ function putAwaySheet(items){
   $('awgo').onclick=()=>{
     rows.forEach(r=>{const p=P(r.code),q=Math.max(1,r.qty||1);
       const sized=p&&p.size&&p.unit,base={code:r.code||null,name:r.code?null:r.name,type:r.type,cat:r.cat,place:r.place,shape:(p&&p.shape)||guessShape(r.type,[],[],0,''),exp:r.exp?new Date(r.exp+'T12:00').getTime():null,added:now(),logs:[],demo:!!r.demo};
-      if(sized)for(let k=0;k<q;k++)S.home.unshift({id:uid(),...base,total:p.size,rem:p.size,unit:p.unit});
-      else S.home.unshift({id:uid(),...base,total:q>1?q:100,rem:q>1?q:100,unit:q>1?'pcs':'%'})
+      if(sized)for(let k=0;k<q;k++){const n={id:uid(),...base,total:p.size,rem:p.size,unit:p.unit};S.home.unshift(n);fresh.add(n.id)}
+      else{const n={id:uid(),...base,total:q>1?q:100,rem:q>1?q:100,unit:q>1?'pcs':'%'};S.home.unshift(n);fresh.add(n.id)}
       if(r.from==='cart')S.cart=S.cart.filter(y=>y.id!==r.id);remember(r)});
-    const first=rows[0].place;S.place=first;S.cat='all';close();render();goPage(2);toast(rows.length===1?`Put away in the ${PL[first].toLowerCase()}`:`${rows.length} items put away`)};
+    haptic(25);const first=rows[0].place;S.place=first;S.cat='all';close();render();goPage(2);toast(rows.length===1?`Put away in the ${PL[first].toLowerCase()}`:`${rows.length} items put away`)};
 }
 
 /* ================= item detail ================= */
@@ -244,7 +261,7 @@ function drawDetail(it){
    <div class="acts" style="margin-top:16px"><button class="btn ghost" data-del="home:${it.id}" data-andclose>${ic('trash')}Delete</button><button class="btn" data-close>Done</button></div>`;
   $('dexp').onchange=e=>{it.exp=e.target.value?new Date(e.target.value+'T12:00').getTime():null;render();toast('Expiry date saved')};
 }
-function setLevel(it,v){
+function setLevel(it,v){haptic(10);
   const target=Math.round(it.total*v*100)/100,used=it.rem-target;
   if(used>0)it.logs.push({t:now(),a:used});
   it.rem=target;if(viewer)viewer.setLevel(v);
@@ -316,7 +333,7 @@ function sendTray(where){
   if(!items.length)return;
   const ents=items.map(t=>({...entry(P(t.code)?t.code:null,trayName(t)||'Item'),code:P(t.code)?t.code:null,qty:t.qty}));
   if(where==='home'){const rows=ents.map(e=>({...e,id:uid()}));stopScanner();putAwaySheet(rows);return}
-  ents.forEach(e=>{const arr=where==='list'?S.list:S.cart;const same=arr.find(x=>keyOf(x)===keyOf(e));if(same)same.qty+=e.qty;else arr.unshift({id:uid(),...e});remember(e);if(where==='cart'){const i=S.list.findIndex(x=>keyOf(x)===keyOf(e)||(!x.code&&e.type&&String(x.name||'').toLowerCase().includes(e.type)));if(i>=0)S.list.splice(i,1)}});
+  ents.forEach(e=>{const arr=where==='list'?S.list:S.cart;const same=arr.find(x=>keyOf(x)===keyOf(e));if(same){same.qty+=e.qty;fresh.add(same.id)}else{const n={id:uid(),...e};arr.unshift(n);fresh.add(n.id)}remember(e);if(where==='cart'){const i=S.list.findIndex(x=>keyOf(x)===keyOf(e)||(!x.code&&e.type&&String(x.name||'').toLowerCase().includes(e.type)));if(i>=0)S.list.splice(i,1)}});
   render();toast(`${ents.length} item${ents.length>1?'s':''} added to your ${where==='list'?'list':'cart'}`);
   if(S.scanMode==='one'){SC.tray=SC.tray.filter(t=>t!==SC.single);SC.single=null;drawTray();startCam()}else{close();goPage(where==='list'?0:1)}
 }
@@ -420,8 +437,8 @@ document.addEventListener('click',e=>{
   if(d.qty){const [w,id]=d.qty.split(':');qtySheet(w,id)}
   if(d.quick){const r=S.recent.find(x=>keyOf(x)===d.quick);if(r){if(r.code)addToList(null,r.code);else addToList(r.name);render()}}
   if('putaway' in d)putAwaySheet(S.cart.map(x=>({...x,from:'cart'})));
-  if(d.place){S.place=d.place;S.cat='all';render()}
-  if(d.cat){S.cat=d.cat;render()}
+  if(d.place){if(S.place!==d.place)haptic(8);S.place=d.place;S.cat='all';render();const g=document.querySelector('#p-home .grid');if(g&&!reduce)g.animate([{opacity:0,transform:'translateY(10px)'},{opacity:1,transform:'none'}],{duration:280,easing:'ease-out'})}
+  if(d.cat){S.cat=d.cat;render();const g=document.querySelector('#p-home .grid');if(g&&!reduce)g.animate([{opacity:0},{opacity:1}],{duration:220,easing:'ease-out'})}
   if(d.open)detail(d.open);
   if(d.lvl){const it=curItem();if(it)setLevel(it,+d.lvl)}
   if(d.mv){const it=curItem();if(it){it.place=d.mv;drawDetail(it);render();toast(`Moved to the ${PL[d.mv].toLowerCase()}`)}}
