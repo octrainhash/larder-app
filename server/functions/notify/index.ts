@@ -7,7 +7,7 @@ import webpush from 'npm:web-push@3.6.7';
 const env = (k: string) => Deno.env.get(k) ?? '';
 const db = createClient(env('SUPABASE_URL'), env('SUPABASE_SERVICE_ROLE_KEY'), {auth: {persistSession: false}});
 webpush.setVapidDetails(env('VAPID_SUBJECT') || 'mailto:hello@example.com', env('VAPID_PUBLIC_KEY'), env('VAPID_PRIVATE_KEY'));
-const APP_URL = env('APP_URL') || 'https://octrainhash.github.io/larder-app/';
+const APP_URL = env('APP_URL') || 'https://octrainhash.github.io/flogger/';
 const cors = {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, content-type, apikey, x-client-info'};
 const DAY = 864e5;
 
